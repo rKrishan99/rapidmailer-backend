@@ -1,6 +1,7 @@
 // src/controllers/emailSendController.js
 import nodemailer from 'nodemailer';
 import { htmlToText } from 'html-to-text';
+import { getSettings } from '../config/settingsStore.js';
 
 const MAX_RECIPIENTS_PER_REQUEST = 500;
 
@@ -19,19 +20,21 @@ export const sendEmails = async (req, res) => {
       });
     }
 
-    const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, FROM_EMAIL } = process.env;
-    if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS || !FROM_EMAIL) {
-      return res.status(500).json({ error: 'Email sending is not configured on the server' });
+    const { smtp } = getSettings();
+    if (!smtp.host || !smtp.port || !smtp.user || !smtp.pass || !smtp.fromEmail) {
+      return res.status(500).json({
+        error: 'Email sending is not configured. Add your SMTP credentials in Settings first.',
+      });
     }
 
     // Create reusable transporter object using SMTP transport
     const transporter = nodemailer.createTransport({
-      host: SMTP_HOST,
-      port: parseInt(SMTP_PORT, 10),
-      secure: process.env.SMTP_SECURE === 'true', // true for 465, false for other ports
+      host: smtp.host,
+      port: smtp.port,
+      secure: smtp.secure, // true for 465, false for other ports
       auth: {
-        user: SMTP_USER,
-        pass: SMTP_PASS,
+        user: smtp.user,
+        pass: smtp.pass,
       },
     });
 
@@ -49,7 +52,7 @@ export const sendEmails = async (req, res) => {
       
       const batchPromises = batch.map(email => {
         const mailOptions = {
-          from: `"${process.env.FROM_NAME || 'RapidMailer'}" <${FROM_EMAIL}>`,
+          from: `"${smtp.fromName || 'RapidMailer'}" <${smtp.fromEmail}>`,
           to: email,
           subject: emailTemplate.subject || 'No Subject',
           html: emailTemplate.html,

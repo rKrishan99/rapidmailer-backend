@@ -1,8 +1,9 @@
 import puppeteer from "puppeteer";
+import { getSettings } from "../config/settingsStore.js";
 
 export async function scrapeGoogleMaps(query, location, maxResults = 100) {
     const browser = await puppeteer.launch({
-        headless: false, // Set to true for production
+        headless: getSettings().scraping.puppeteerHeadless,
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',

@@ -1,8 +1,9 @@
 import puppeteer from "puppeteer";
+import { getSettings } from "../../config/settingsStore.js";
 
 async function scrapeGoogleSearch(keyword, location, maxResults = 10) {
     const browser = await puppeteer.launch({
-      headless: process.env.PUPPETEER_HEADLESS !== 'false',
+      headless: getSettings().scraping.puppeteerHeadless,
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",

@@ -9,13 +9,15 @@ import googleMapsRoute from './src/routes/googleMapsRoute.js';
 import emailExtractorRoute from './src/routes/emailExtractorRoute.js';
 import emailVerifyRoute from './src/routes/emailVerifyRouter.js';
 import emailSendRoute from './src/routes/emailSendRoute.js';
+import techDetectorRoute from './src/routes/techDetectorRoute.js';
+import websiteAuditRoute from './src/routes/websiteAuditRoute.js';
+import settingsRoute from './src/routes/settingsRoute.js';
+import { isSmtpConfigured } from './src/config/settingsStore.js';
 
 dotenv.config();
 
-const REQUIRED_ENV_VARS = ['SMTP_HOST', 'SMTP_PORT', 'SMTP_USER', 'SMTP_PASS', 'FROM_EMAIL'];
-const missingEnvVars = REQUIRED_ENV_VARS.filter((key) => !process.env[key]);
-if (missingEnvVars.length > 0) {
-  console.warn(`⚠️  Missing SMTP env vars: ${missingEnvVars.join(', ')} — /api/send-emails will fail until they are set.`);
+if (!isSmtpConfigured()) {
+  console.warn('⚠️  SMTP is not configured — /api/send-emails will fail until you set it up in Settings.');
 }
 
 const app = express();
@@ -62,6 +64,9 @@ app.use('/api', googleMapsRoute);
 app.use('/api', emailExtractorRoute);
 app.use('/api', emailVerifyRoute);
 app.use('/api', emailSendRoute);
+app.use('/api', techDetectorRoute);
+app.use('/api', websiteAuditRoute);
+app.use('/api', settingsRoute);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
