@@ -2,7 +2,7 @@ import puppeteer from "puppeteer";
 
 export async function scrapeGoogleMaps(query, location, maxResults = 100) {
   const browser = await puppeteer.launch({
-    headless: false, // Set to true for production
+    headless: process.env.PUPPETEER_HEADLESS !== 'false',
     args: [
       "--no-sandbox",
       "--disable-setuid-sandbox",
@@ -14,6 +14,14 @@ export async function scrapeGoogleMaps(query, location, maxResults = 100) {
     defaultViewport: null,
   });
 
+  try {
+    return await runGoogleMapsScrape(browser, query, location, maxResults);
+  } finally {
+    await browser.close();
+  }
+}
+
+async function runGoogleMapsScrape(browser, query, location, maxResults) {
   const page = await browser.newPage();
 
   // Set a realistic user-agent
@@ -33,7 +41,6 @@ export async function scrapeGoogleMaps(query, location, maxResults = 100) {
     console.log("Page loaded successfully.");
   } catch (error) {
     console.error("Error waiting for selector: ", error);
-    await browser.close();
     return { error: "Failed to load the page properly" };
   }
 
@@ -164,8 +171,6 @@ export async function scrapeGoogleMaps(query, location, maxResults = 100) {
   }
 
   console.log("Extracted detailed data:", extractedData);
-
-  await browser.close();
 
   // Deduplicate results
   const uniqueBusinesses = Array.from(
