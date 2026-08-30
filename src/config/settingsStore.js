@@ -4,7 +4,9 @@ import { fileURLToPath } from "node:url";
 import { encryptSecret, decryptSecret } from "../utils/crypto.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = path.join(__dirname, "..", "..", "data");
+// Overridable so a packaged desktop build can point this at the OS user-data
+// folder instead of writing next to (possibly read-only) application code.
+const DATA_DIR = process.env.RAPIDMAILER_DATA_DIR || path.join(__dirname, "..", "..", "data");
 const SETTINGS_FILE = path.join(DATA_DIR, "settings.json");
 
 export class SettingsValidationError extends Error {}

@@ -4,6 +4,9 @@ import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
 import rateLimit from 'express-rate-limit';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import googleMapsRoute from './src/routes/googleMapsRoute.js';
 import emailExtractorRoute from './src/routes/emailExtractorRoute.js';
@@ -15,6 +18,8 @@ import settingsRoute from './src/routes/settingsRoute.js';
 import { isSmtpConfigured } from './src/config/settingsStore.js';
 
 dotenv.config();
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 if (!isSmtpConfigured()) {
   console.warn('⚠️  SMTP is not configured — /api/send-emails will fail until you set it up in Settings.');
@@ -72,6 +77,16 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+// Serve the built frontend when it's shipped alongside this server (the
+// desktop build). Absent in normal dev, where Vite serves the frontend.
+const FRONTEND_DIR = path.join(__dirname, '..', 'frontend');
+if (fs.existsSync(FRONTEND_DIR)) {
+  app.use(express.static(FRONTEND_DIR));
+  app.get(/^(?!\/api).*/, (req, res) => {
+    res.sendFile(path.join(FRONTEND_DIR, 'index.html'));
+  });
+}
+
 // 404 handler
 app.use((req, res) => {
   res.status(404).json({ error: 'Not found' });
@@ -89,7 +104,7 @@ app.use((err, req, res, next) => {
   });
 });
 
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, '127.0.0.1', () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });
 
