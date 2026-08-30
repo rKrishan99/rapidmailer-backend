@@ -1,26 +1,28 @@
 import express from "express";
-import { scrapeGoogleMaps } from "../controller/googleMapController.js";
+import { scrapeGoogleMaps } from "../scrapers/googleMapScraper.js";
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
 
 const router = express.Router();
 
 router.get("/google-maps", async (req, res) => {
   try {
-    const { keyword, location, limit } = req.query;
+    const { query, location, limit } = req.query;
 
-    console.log(keyword, location, limit);
-
-    if (!keyword || !location) {
+    if (!query || !location) {
       return res
         .status(400)
         .json({ error: "Query and location are required!" });
     }
 
     const results = await scrapeGoogleMaps(
-      keyword,
+      query,
       location,
-      limit ? parseInt(limit) : 100 // Increased default from 10 to 100
+      limit ? parseInt(limit) : 10
     );
     res.json({ results });
+    
   } catch (error) {
     console.error("Scraping Error:", error);
     res.status(500).json({ error: "Failed to scrape Google Maps" });
@@ -28,3 +30,4 @@ router.get("/google-maps", async (req, res) => {
 });
 
 export default router;
+                                                                                                                                                                                                                                                                                                                                                    
