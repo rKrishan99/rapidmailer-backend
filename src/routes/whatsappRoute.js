@@ -27,7 +27,7 @@ router.post("/whatsapp/accounts", (req, res) => {
     if (error instanceof SettingsValidationError) {
       return res.status(400).json({ error: error.message });
     }
-    console.error("Failed to add WhatsApp account:", error);
+    console.error("Failed to add WhatsApp account:", error.message);
     res.status(500).json({ error: "Failed to add WhatsApp account" });
   }
 });
@@ -47,7 +47,7 @@ router.put("/whatsapp/accounts/:id", (req, res) => {
     if (error instanceof SettingsValidationError) {
       return res.status(400).json({ error: error.message });
     }
-    console.error("Failed to update WhatsApp account:", error);
+    console.error("Failed to update WhatsApp account:", error.message);
     res.status(500).json({ error: "Failed to update WhatsApp account" });
   }
 });
@@ -60,7 +60,7 @@ router.delete("/whatsapp/accounts/:id", (req, res) => {
     if (error instanceof SettingsValidationError) {
       return res.status(400).json({ error: error.message });
     }
-    console.error("Failed to delete WhatsApp account:", error);
+    console.error("Failed to delete WhatsApp account:", error.message);
     res.status(500).json({ error: "Failed to delete WhatsApp account" });
   }
 });
@@ -80,7 +80,7 @@ router.post("/whatsapp/test-connection", async (req, res) => {
       displayPhoneNumber: result.displayPhoneNumber,
     });
   } catch (error) {
-    console.error("WhatsApp connection test failed:", error);
+    console.error("WhatsApp connection test failed:", error.message);
     res.status(500).json({ error: "Failed to test the WhatsApp connection" });
   }
 });
@@ -139,7 +139,7 @@ router.post("/whatsapp/send-bulk", async (req, res) => {
     if (error.code === "NOT_CONFIGURED") {
       return res.status(400).json({ error: error.message });
     }
-    console.error("WhatsApp bulk send error:", error);
+    console.error("WhatsApp bulk send error:", error.message);
     res.status(500).json({ error: "Failed to send WhatsApp messages" });
   }
 });

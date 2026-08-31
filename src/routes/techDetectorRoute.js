@@ -5,9 +5,13 @@ const router = express.Router();
 
 const MAX_BULK_URLS = 25;
 
-router.get("/detect-tech", async (req, res) => {
+// POST (not GET) even for a single URL: this triggers real network/scraping
+// activity as a side effect, so it needs the CORS preflight a JSON POST body
+// gets — a GET+query-string version would be triggerable by any web page
+// the user has open (e.g. an <img> tag), since simple GETs bypass preflight.
+router.post("/detect-tech", async (req, res) => {
   try {
-    const { url } = req.query;
+    const { url } = req.body || {};
     if (!url) {
       return res.status(400).json({ error: "url is required" });
     }
@@ -15,7 +19,7 @@ router.get("/detect-tech", async (req, res) => {
     const result = await detectTechForUrl(url);
     res.json({ result });
   } catch (error) {
-    console.error("Tech detection error:", error);
+    console.error("Tech detection error:", error.message);
     res.status(500).json({ error: "Failed to detect website technology" });
   }
 });
@@ -33,7 +37,7 @@ router.post("/detect-tech-bulk", async (req, res) => {
     const results = await detectTechBulk(urls);
     res.json({ results });
   } catch (error) {
-    console.error("Bulk tech detection error:", error);
+    console.error("Bulk tech detection error:", error.message);
     res.status(500).json({ error: "Failed to detect website technologies" });
   }
 });

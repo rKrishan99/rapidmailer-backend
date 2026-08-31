@@ -1,15 +1,25 @@
 import puppeteer from "puppeteer";
 import { getSettings } from "../../config/settingsStore.js";
+import { trackBrowser, untrackBrowser, isMissingBrowserError } from "../../utils/browserRegistry.js";
 
 async function scrapeGoogleSearch(keyword, location, maxResults = 10) {
-    const browser = await puppeteer.launch({
-      headless: getSettings().scraping.puppeteerHeadless,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-blink-features=AutomationControlled",
-      ],
-    });
+    let browser;
+    try {
+      browser = await puppeteer.launch({
+        headless: getSettings().scraping.puppeteerHeadless,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-blink-features=AutomationControlled",
+        ],
+      });
+    } catch (err) {
+      if (isMissingBrowserError(err)) {
+        throw new Error("SCRAPER_ENGINE_MISSING");
+      }
+      throw err;
+    }
+    trackBrowser(browser);
 
     try {
       const page = await browser.newPage();
@@ -52,7 +62,8 @@ async function scrapeGoogleSearch(keyword, location, maxResults = 10) {
 
       return results.slice(0, maxResults);
     } finally {
-      await browser.close();
+      untrackBrowser(browser);
+      await browser.close().catch(() => {});
     }
   }
 

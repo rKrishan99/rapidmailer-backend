@@ -5,9 +5,12 @@ const router = express.Router();
 
 const MAX_BULK_URLS = 15;
 
-router.get("/audit-website", async (req, res) => {
+// POST (not GET): triggers real network requests as a side effect, so it
+// needs the CORS preflight a JSON body gets rather than being triggerable
+// by any web page the user has open via a simple GET.
+router.post("/audit-website", async (req, res) => {
   try {
-    const { url } = req.query;
+    const { url } = req.body || {};
     if (!url) {
       return res.status(400).json({ error: "url is required" });
     }
@@ -15,7 +18,7 @@ router.get("/audit-website", async (req, res) => {
     const result = await auditWebsite(url);
     res.json({ result });
   } catch (error) {
-    console.error("Website audit error:", error);
+    console.error("Website audit error:", error.message);
     res.status(500).json({ error: "Failed to audit website" });
   }
 });
@@ -33,7 +36,7 @@ router.post("/audit-website-bulk", async (req, res) => {
     const results = await auditWebsiteBulk(urls);
     res.json({ results });
   } catch (error) {
-    console.error("Bulk website audit error:", error);
+    console.error("Bulk website audit error:", error.message);
     res.status(500).json({ error: "Failed to audit websites" });
   }
 });

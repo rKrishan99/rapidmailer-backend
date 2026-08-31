@@ -19,13 +19,31 @@ import emailAccountsRoute from './src/routes/emailAccountsRoute.js';
 import socialEnrichRoute from './src/routes/socialEnrichRoute.js';
 import whatsappRoute from './src/routes/whatsappRoute.js';
 import { isEmailConfigured } from './src/config/settingsStore.js';
+import { closeAllTrackedBrowsers } from './src/utils/browserRegistry.js';
 
 dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-if (!isEmailConfigured()) {
-  console.warn('⚠️  No email account is configured — /api/send-emails will fail until you add one in Email Accounts.');
+// Last-resort safety net: this is a single-user desktop app with no one to
+// restart a crashed server for them, so the right default is to log and
+// keep running rather than let Node's default "crash the whole process"
+// behavior take down an in-progress task over one unexpected error. Real
+// bugs still show up in the log for us to fix; the user just doesn't lose
+// their session over it.
+process.on('uncaughtException', (err) => {
+  console.error('⚠️  Uncaught exception (continuing):', err.message, err.stack);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠️  Unhandled promise rejection (continuing):', reason?.message || reason);
+});
+
+try {
+  if (!isEmailConfigured()) {
+    console.warn('⚠️  No email account is configured — /api/send-emails will fail until you add one in Email Accounts.');
+  }
+} catch (err) {
+  console.error('⚠️  Could not check email configuration at startup:', err.message);
 }
 
 const app = express();
@@ -58,10 +76,16 @@ app.use(
 
 app.use(express.json({ limit: '1mb' }));
 
-// Rate limiting — scraping and email sending are expensive/abusable operations
+// Rate limiting. This is a single-user desktop app bound to 127.0.0.1 — the
+// only realistic client is the app's own frontend, not an external
+// adversary — so this exists as a basic backstop against a runaway retry
+// loop, not a security boundary. The real abuse control is the per-request
+// caps on each bulk endpoint (MAX_RECIPIENTS_PER_REQUEST, MAX_BULK_URLS,
+// etc.), which a legitimate power user running several of those back-to-back
+// can hit well before 100 requests in 15 minutes — hence the generous limit.
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 100,
+  max: 2000,
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -100,7 +124,7 @@ app.use((req, res) => {
 
 // Central error handler
 app.use((err, req, res, next) => {
-  console.error(err);
+  console.error(err.message);
   if (err.message === 'Not allowed by CORS') {
     return res.status(403).json({ error: 'Origin not allowed' });
   }
@@ -114,11 +138,31 @@ const server = app.listen(PORT, '127.0.0.1', () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
 });
 
+// Node's default behavior for an unhandled 'error' event on a Server is to
+// throw, which (via the uncaughtException handler above) would otherwise
+// just log and limp along with no port bound at all. EADDRINUSE specifically
+// means this process can never do its job, so exit cleanly and clearly
+// instead — the desktop wrapper (main.js) detects this exit and shows the
+// user an actual error dialog rather than a silently-dead backend.
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`⚠️  Port ${PORT} is already in use — is another copy of RapidMailer already running?`);
+    process.exit(1);
+  }
+  console.error('⚠️  Server error:', err.message);
+  process.exit(1);
+});
+
 const shutdown = (signal) => {
   console.log(`${signal} received, shutting down gracefully...`);
-  server.close(() => {
-    console.log('Server closed.');
-    process.exit(0);
+  closeAllTrackedBrowsers().finally(() => {
+    server.close(() => {
+      console.log('Server closed.');
+      process.exit(0);
+    });
+    // Don't wait forever on a hung connection/scrape — force exit if
+    // server.close()'s callback hasn't fired shortly after.
+    setTimeout(() => process.exit(0), 5000).unref();
   });
 };
 

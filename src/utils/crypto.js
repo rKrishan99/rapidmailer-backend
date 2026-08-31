@@ -26,7 +26,34 @@ function loadOrCreateKey() {
   return key;
 }
 
-const KEY = loadOrCreateKey();
+// This runs at import time, before the server has a chance to start — on a
+// machine where DATA_DIR isn't writable (locked-down profile, AV blocking
+// the folder, etc.) an uncaught fs error here would crash the whole process
+// before it ever binds a port. Fall back to a session-only in-memory key
+// instead: encryption still works for the running session, it just won't
+// survive a restart (so previously-saved secrets won't decrypt, and newly
+// saved ones won't persist across a relaunch) until the underlying
+// permission issue is fixed.
+let usingEphemeralKey = false;
+function loadKeySafely() {
+  try {
+    return loadOrCreateKey();
+  } catch (err) {
+    usingEphemeralKey = true;
+    console.error(
+      `⚠️  Could not read/create the encryption key at ${KEY_FILE} (${err.message}). ` +
+        `Falling back to a temporary in-session key — saved credentials won't persist until this is fixed. ` +
+        `Check that RapidMailer has write access to that folder.`
+    );
+    return crypto.randomBytes(32);
+  }
+}
+
+const KEY = loadKeySafely();
+
+export function isUsingEphemeralKey() {
+  return usingEphemeralKey;
+}
 
 export function encryptSecret(plaintext) {
   if (!plaintext) return "";

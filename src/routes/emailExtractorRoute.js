@@ -5,16 +5,22 @@ import extractEmailsFromWebsite, {
 import scrapeGoogleSearch from "../controller/scrapers/googleSearchScraper.js";
 
 const router = express.Router();
+const MAX_RESULTS = 100;
 
-router.get('/extract-emails', async (req, res) => {
+// POST (not GET): launches Puppeteer and scrapes Google as a side effect,
+// so it needs the CORS preflight a JSON body gets rather than being
+// triggerable by any web page the user has open via a simple GET.
+router.post('/extract-emails', async (req, res) => {
   try {
-      const { keyword, location, limit } = req.query;
+      const { keyword, location, limit } = req.body || {};
       if (!keyword) {
           return res.status(400).json({ error: 'Keyword is required!' });
       }
 
       // Step 1: Scrape Google Search Results
-      const businesses = await scrapeGoogleSearch(keyword, location, limit ? parseInt(limit) : 10);
+      const parsedLimit = limit ? parseInt(limit, 10) : 10;
+      const boundedLimit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), MAX_RESULTS) : 10;
+      const businesses = await scrapeGoogleSearch(keyword, location, boundedLimit);
 
       // Step 2: Visit each website and extract emails
       for (const business of businesses) {
@@ -23,7 +29,12 @@ router.get('/extract-emails', async (req, res) => {
 
       res.json({ results: businesses });
   } catch (error) {
-      console.error('Error:', error);
+      if (error.message === 'SCRAPER_ENGINE_MISSING') {
+        return res.status(503).json({
+          error: "The scraping engine (Chromium) isn't installed. Reinstall the app, or run \"npm install\" in the backend folder to download it.",
+        });
+      }
+      console.error('Error:', error.message);
       res.status(500).json({ error: 'Failed to extract emails' });
   }
 });
@@ -48,7 +59,7 @@ router.post('/enrich-emails-bulk', async (req, res) => {
       const results = await enrichLeadsWithEmails(leads);
       res.json({ results });
   } catch (error) {
-      console.error('Bulk Email Enrichment Error:', error);
+      console.error('Bulk Email Enrichment Error:', error.message);
       res.status(500).json({ error: 'Failed to enrich leads with emails' });
   }
 });

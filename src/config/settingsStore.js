@@ -222,14 +222,32 @@ function writeToDisk(settings) {
 }
 
 let cache = null;
+let usingEphemeralSettings = false;
 
+// Runs at first use, potentially before the server has bound a port. On a
+// machine where DATA_DIR isn't writable (locked-down profile, AV blocking
+// the folder, read-only install path) an uncaught fs error here would crash
+// the whole process. Degrade instead: keep running with in-memory-only
+// settings for this session rather than dying — the user can still use the
+// app, they just won't have their settings saved until the underlying
+// permission issue is fixed (surfaced via isUsingEphemeralSettings()).
 function ensureLoaded() {
   if (cache) return cache;
 
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(SETTINGS_FILE)) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    if (!fs.existsSync(SETTINGS_FILE)) {
+      cache = defaultsFromEnv();
+      writeToDisk(cache);
+      return cache;
+    }
+  } catch (err) {
+    usingEphemeralSettings = true;
+    console.error(
+      `⚠️  Could not create/write ${DATA_DIR} (${err.message}). Running with in-memory-only settings — ` +
+        `nothing will be saved until RapidMailer has write access to that folder.`
+    );
     cache = defaultsFromEnv();
-    writeToDisk(cache);
     return cache;
   }
 
@@ -237,9 +255,22 @@ function ensureLoaded() {
     cache = readFromDisk();
   } catch (err) {
     console.error("Failed to read settings.json, falling back to .env defaults:", err.message);
+    // Preserve the unreadable file instead of letting the next save silently
+    // overwrite it — corruption (a crash mid-write outside this app, a bad
+    // manual edit, disk fault) shouldn't destroy whatever was recoverable.
+    try {
+      fs.renameSync(SETTINGS_FILE, `${SETTINGS_FILE}.corrupted-${Date.now()}`);
+    } catch {
+      // Best effort — if even the rename fails, proceed with defaults anyway
+      // rather than blocking startup over it.
+    }
     cache = defaultsFromEnv();
   }
   return cache;
+}
+
+export function isUsingEphemeralSettings() {
+  return usingEphemeralSettings;
 }
 
 function persist(next) {

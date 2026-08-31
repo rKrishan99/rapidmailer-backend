@@ -66,6 +66,7 @@ async function checkExposedFiles(url, homepageHtml) {
         const res = await axios.get(target, {
           timeout: 8000,
           maxRedirects: 0,
+          maxContentLength: 5 * 1024 * 1024,
           validateStatus: () => true,
           headers: { "User-Agent": USER_AGENT },
         });
@@ -84,6 +85,7 @@ async function checkTextResourceExists(url, path) {
     const target = new URL(path, url.origin).toString();
     const res = await axios.get(target, {
       timeout: 8000,
+      maxContentLength: 5 * 1024 * 1024,
       validateStatus: () => true,
       headers: { "User-Agent": USER_AGENT },
     });

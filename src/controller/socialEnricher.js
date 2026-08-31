@@ -53,6 +53,7 @@ async function searchDuckDuckGo(query) {
   const response = await axios.get("https://html.duckduckgo.com/html/", {
     params: { q: query },
     timeout: 15000,
+    maxContentLength: 5 * 1024 * 1024,
     headers: {
       "User-Agent": USER_AGENT,
       Accept: "text/html",
@@ -148,6 +149,7 @@ async function extractContactFromFacebookPage(facebookUrl) {
   try {
     const response = await axios.get(facebookUrl, {
       timeout: 12000,
+      maxContentLength: 5 * 1024 * 1024,
       headers: { "User-Agent": USER_AGENT },
       validateStatus: () => true,
     });
