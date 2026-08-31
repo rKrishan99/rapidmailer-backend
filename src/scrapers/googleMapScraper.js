@@ -46,8 +46,22 @@ export async function scrapeGoogleMaps(query, location, maxResults = 100) {
             return { error: 'Failed to load the page properly' };
         }
 
-        // Scroll to load more results
-        for (let i = 0; i < 5; i++) {
+        // Scroll to load more results. 5 attempts used to cut this off way
+        // before Google's own local-pack ceiling (~100-120 results) — bulk
+        // searches were silently truncated to whatever loaded in the first
+        // few scrolls. 25 attempts is enough to actually reach that ceiling
+        // for a big city + broad keyword; it still exits fast (a few
+        // seconds) for a smaller city that runs out sooner, and stops as
+        // soon as we already have enough for the requested maxResults so a
+        // small request doesn't scroll further than it needs to.
+        const MAX_SCROLL_ATTEMPTS = 25;
+        for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
+            const loadedCount = await page.evaluate(() => document.querySelectorAll('.Nv2PK').length);
+            if (loadedCount >= maxResults) {
+                console.log(`Loaded ${loadedCount} results, which covers the requested ${maxResults} — stopping scroll.`);
+                break;
+            }
+
             const previousHeight = await page.evaluate('document.body.scrollHeight');
             await page.evaluate('window.scrollTo(0, document.body.scrollHeight)');
 
@@ -57,7 +71,7 @@ export async function scrapeGoogleMaps(query, location, maxResults = 100) {
                     { timeout: 5000 }
                 );
             } catch (error) {
-                console.log("No more content to load.");
+                console.log("No more content to load — reached Google's own end of the list for this search.");
                 break;
             }
         }
