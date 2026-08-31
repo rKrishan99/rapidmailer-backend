@@ -141,14 +141,38 @@ async function sendOne({ accessToken, phoneNumberId, apiVersion }, payload) {
 // for a bulk send to leads who haven't messaged you first) or plain text
 // (only actually deliverable inside the 24h window after a customer messages
 // you first — kept here for completeness/replies, not for bulk sending).
+//
+// `message.header` (template mode only) is how a media header gets attached
+// — Meta's own template header types are TEXT / IMAGE / VIDEO / DOCUMENT /
+// LOCATION (GIF is Marketing Messages API only); RapidMailer supports IMAGE
+// and VIDEO here. The template itself must already exist in Meta with a
+// matching header type (created + approved in Meta Business Manager,
+// RapidMailer doesn't create templates) — this just supplies the per-send
+// media via a public link, exactly as Meta's send-message API expects:
+// { type: "header", parameters: [{ type: "image", image: { link } }] }.
+// Because it's supplied per send (not baked into the template), it can be a
+// different image/video for every recipient.
 function buildMessagePayload(to, message) {
   if (message.mode === "text") {
     return { to, type: "text", text: { body: message.text || "" } };
   }
 
-  const parameters = (message.bodyParams || [])
+  const components = [];
+
+  if (message.header && message.header.type && message.header.type !== "none" && message.header.mediaUrl) {
+    const headerType = message.header.type;
+    components.push({
+      type: "header",
+      parameters: [{ type: headerType, [headerType]: { link: message.header.mediaUrl } }],
+    });
+  }
+
+  const bodyParameters = (message.bodyParams || [])
     .filter((v) => v !== undefined && v !== null && String(v).length > 0)
     .map((v) => ({ type: "text", text: String(v) }));
+  if (bodyParameters.length > 0) {
+    components.push({ type: "body", parameters: bodyParameters });
+  }
 
   return {
     to,
@@ -156,7 +180,7 @@ function buildMessagePayload(to, message) {
     template: {
       name: message.templateName,
       language: { code: message.templateLanguage || "en_US" },
-      ...(parameters.length > 0 ? { components: [{ type: "body", parameters }] } : {}),
+      ...(components.length > 0 ? { components } : {}),
     },
   };
 }
@@ -172,7 +196,10 @@ function buildMessagePayload(to, message) {
  * @param {Array<{phone: string, [key: string]: any}>} recipients - each row
  *   must carry a phone number under `phone` (already resolved by the caller
  *   via flexible column detection) plus whatever fields the template needs.
- * @param {{mode: 'template'|'text', templateName?, templateLanguage?, bodyParamFields?: string[], text?}} message
+ * @param {{mode: 'template'|'text', templateName?, templateLanguage?, bodyParamFields?: string[], text?, header?: {type: 'image'|'video', mediaUrl?: string, mediaUrlField?: string}}} message
+ *   `header.mediaUrl` is one fixed URL used for every recipient; `header.mediaUrlField`
+ *   instead reads a different URL per recipient from that CSV column (the
+ *   fixed URL wins if both are somehow set).
  * @param {{accountId: string, batchSize?: number, delayMs?: number, defaultCountryCode?: string}} options
  */
 export async function sendBulkWhatsapp(recipients, message, options = {}) {
@@ -216,12 +243,26 @@ export async function sendBulkWhatsapp(recipients, message, options = {}) {
             ? (message.bodyParamFields || []).map((field) => recipient[field] ?? "")
             : [];
 
+        let header = null;
+        if (message.mode === "template" && message.header && message.header.type && message.header.type !== "none") {
+          const mediaUrl = message.header.mediaUrl || (message.header.mediaUrlField ? recipient[message.header.mediaUrlField] : "");
+          if (!mediaUrl) {
+            return {
+              ...recipient,
+              status: "failed",
+              error: `No ${message.header.type} URL for this row — check the mapped column or the fixed URL in the Message card.`,
+            };
+          }
+          header = { type: message.header.type, mediaUrl: String(mediaUrl).trim() };
+        }
+
         const payload = buildMessagePayload(to, {
           mode: message.mode,
           templateName: message.templateName,
           templateLanguage: message.templateLanguage,
           bodyParams,
           text: message.text,
+          header,
         });
 
         const outcome = await sendOne(creds, payload);

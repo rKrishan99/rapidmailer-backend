@@ -113,6 +113,16 @@ router.post("/whatsapp/send-bulk", async (req, res) => {
     if (message.mode === "text" && !message.text) {
       return res.status(400).json({ error: "text is required for text mode" });
     }
+    if (message.header && message.header.type && message.header.type !== "none") {
+      if (!["image", "video"].includes(message.header.type)) {
+        return res.status(400).json({ error: "header.type must be 'image', 'video', or omitted." });
+      }
+      if (!message.header.mediaUrl && !message.header.mediaUrlField) {
+        return res
+          .status(400)
+          .json({ error: "Give a media URL, or map a CSV column that holds a per-lead media URL." });
+      }
+    }
 
     const results = await sendBulkWhatsapp(recipients, message, settings);
 

@@ -1,7 +1,7 @@
 // src/controllers/emailSendController.js
 import nodemailer from 'nodemailer';
 import { htmlToText } from 'html-to-text';
-import { getSettings } from '../config/settingsStore.js';
+import { getEmailAccount, getDefaultEmailAccount } from '../config/settingsStore.js';
 
 const MAX_RECIPIENTS_PER_REQUEST = 500;
 
@@ -59,16 +59,25 @@ async function sendInBatches(transporter, items, buildMailOptions, batchSize = 1
 
 export const sendEmails = async (req, res) => {
   try {
-    const { emailTemplate, emails, mode, records } = req.body;
+    const { emailTemplate, emails, mode, records, accountId } = req.body;
 
     if (!emailTemplate) {
       return res.status(400).json({ error: 'Invalid request data' });
     }
 
-    const { smtp } = getSettings();
-    if (!smtp.host || !smtp.port || !smtp.user || !smtp.pass || !smtp.fromEmail) {
+    let smtp;
+    if (accountId) {
+      smtp = getEmailAccount(accountId);
+      if (!smtp) {
+        return res.status(400).json({ error: 'No email account with that id' });
+      }
+    } else {
+      smtp = getDefaultEmailAccount();
+    }
+
+    if (!smtp || !smtp.host || !smtp.port || !smtp.user || !smtp.pass || !smtp.fromEmail) {
       return res.status(500).json({
-        error: 'Email sending is not configured. Add your SMTP credentials in Settings first.',
+        error: 'Email sending is not configured. Add a sender account in Email Accounts first.',
       });
     }
 

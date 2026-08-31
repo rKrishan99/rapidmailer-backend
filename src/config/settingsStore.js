@@ -20,13 +20,13 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-function newAccountId() {
-  return `wa_${crypto.randomBytes(8).toString("hex")}`;
+function newAccountId(prefix) {
+  return `${prefix}_${crypto.randomBytes(8).toString("hex")}`;
 }
 
 function emptyWhatsappAccount(overrides = {}) {
   return {
-    id: newAccountId(),
+    id: newAccountId("wa"),
     label: "",
     accessToken: "",
     phoneNumberId: "",
@@ -41,6 +41,22 @@ function emptyWhatsappAccount(overrides = {}) {
   };
 }
 
+function emptyEmailAccount(overrides = {}) {
+  return {
+    id: newAccountId("em"),
+    label: "",
+    host: "",
+    port: 587,
+    secure: false,
+    user: "",
+    pass: "",
+    fromEmail: "",
+    fromName: "RapidMailer",
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
 // .env values are only used to seed settings.json the first time it's
 // created — after that, settings.json (editable live via the UI) wins. A
 // single account is seeded from .env if any WHATSAPP_* var is set, so an
@@ -50,15 +66,24 @@ function defaultsFromEnv() {
   const envHasWhatsapp =
     process.env.WHATSAPP_ACCESS_TOKEN || process.env.WHATSAPP_PHONE_NUMBER_ID;
 
+  const envHasSmtp = process.env.SMTP_HOST || process.env.SMTP_USER;
+
   return {
-    smtp: {
-      host: process.env.SMTP_HOST || "",
-      port: Number(process.env.SMTP_PORT) || 587,
-      secure: process.env.SMTP_SECURE === "true",
-      user: process.env.SMTP_USER || "",
-      pass: process.env.SMTP_PASS || "",
-      fromEmail: process.env.FROM_EMAIL || "",
-      fromName: process.env.FROM_NAME || "RapidMailer",
+    emailAccounts: {
+      accounts: envHasSmtp
+        ? [
+            emptyEmailAccount({
+              label: "Default",
+              host: process.env.SMTP_HOST || "",
+              port: Number(process.env.SMTP_PORT) || 587,
+              secure: process.env.SMTP_SECURE === "true",
+              user: process.env.SMTP_USER || "",
+              pass: process.env.SMTP_PASS || "",
+              fromEmail: process.env.FROM_EMAIL || "",
+              fromName: process.env.FROM_NAME || "RapidMailer",
+            }),
+          ]
+        : [],
     },
     scraping: {
       puppeteerHeadless: process.env.PUPPETEER_HEADLESS !== "false",
@@ -105,17 +130,48 @@ function migrateWhatsappShape(raw) {
   return [];
 }
 
+// Older settings.json files stored a single SMTP account inline (smtp.host /
+// smtp.user etc, no accounts array). Migrates that shape into a one-item
+// accounts array the first time it's read, so nobody who configured SMTP
+// before multi-account support loses their saved sender. `pass` here is
+// still the raw (encrypted) on-disk string — decrypted uniformly below,
+// same as every other account, whichever shape it came from.
+function migrateEmailShape(raw) {
+  if (raw?.emailAccounts?.accounts) return raw.emailAccounts.accounts;
+  if (raw?.smtp?.host || raw?.smtp?.user) {
+    return [
+      emptyEmailAccount({
+        label: "Default",
+        host: raw.smtp.host || "",
+        port: raw.smtp.port || 587,
+        secure: Boolean(raw.smtp.secure),
+        user: raw.smtp.user || "",
+        pass: raw.smtp.pass || "",
+        fromEmail: raw.smtp.fromEmail || "",
+        fromName: raw.smtp.fromName || "RapidMailer",
+      }),
+    ];
+  }
+  return [];
+}
+
 function readFromDisk() {
   const raw = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
   const defaults = defaultsFromEnv();
 
-  const rawAccounts = migrateWhatsappShape(raw);
+  const rawWhatsappAccounts = migrateWhatsappShape(raw);
+  const rawEmailAccounts = migrateEmailShape(raw);
 
   return {
-    smtp: {
-      ...defaults.smtp,
-      ...raw.smtp,
-      pass: raw.smtp?.pass ? decryptSecret(raw.smtp.pass) : defaults.smtp.pass,
+    emailAccounts: {
+      accounts:
+        rawEmailAccounts.length > 0
+          ? rawEmailAccounts.map((acc) => ({
+              ...emptyEmailAccount(),
+              ...acc,
+              pass: acc.pass ? decryptSecret(acc.pass) : "",
+            }))
+          : defaults.emailAccounts.accounts,
     },
     scraping: { ...defaults.scraping, ...raw.scraping },
     integrations: {
@@ -127,8 +183,8 @@ function readFromDisk() {
     },
     whatsapp: {
       accounts:
-        rawAccounts.length > 0
-          ? rawAccounts.map((acc) => ({
+        rawWhatsappAccounts.length > 0
+          ? rawWhatsappAccounts.map((acc) => ({
               ...emptyWhatsappAccount(),
               ...acc,
               accessToken: acc.accessToken ? decryptSecret(acc.accessToken) : "",
@@ -140,7 +196,12 @@ function readFromDisk() {
 
 function writeToDisk(settings) {
   const toStore = {
-    smtp: { ...settings.smtp, pass: encryptSecret(settings.smtp.pass) },
+    emailAccounts: {
+      accounts: settings.emailAccounts.accounts.map((acc) => ({
+        ...acc,
+        pass: encryptSecret(acc.pass),
+      })),
+    },
     scraping: { ...settings.scraping },
     integrations: {
       ...settings.integrations,
@@ -208,17 +269,26 @@ function redactWhatsappAccount(acc) {
   };
 }
 
+function redactEmailAccount(acc) {
+  return {
+    id: acc.id,
+    label: acc.label,
+    host: acc.host,
+    port: acc.port,
+    secure: acc.secure,
+    user: acc.user,
+    passConfigured: Boolean(acc.pass),
+    fromEmail: acc.fromEmail,
+    fromName: acc.fromName,
+    createdAt: acc.createdAt,
+  };
+}
+
 export function getPublicSettings() {
   const s = getSettings();
   return {
-    smtp: {
-      host: s.smtp.host,
-      port: s.smtp.port,
-      secure: s.smtp.secure,
-      user: s.smtp.user,
-      passConfigured: Boolean(s.smtp.pass),
-      fromEmail: s.smtp.fromEmail,
-      fromName: s.smtp.fromName,
+    emailAccounts: {
+      accounts: s.emailAccounts.accounts.map(redactEmailAccount),
     },
     scraping: { ...s.scraping },
     integrations: {
@@ -234,27 +304,6 @@ export function updateSettings(partial = {}) {
   const current = ensureLoaded();
   const next = structuredClone(current);
 
-  if (partial.smtp) {
-    const s = partial.smtp;
-    if (s.host !== undefined) next.smtp.host = String(s.host).trim();
-    if (s.port !== undefined) {
-      const port = Number(s.port);
-      if (!isValidPort(port)) throw new SettingsValidationError("SMTP port must be between 1 and 65535");
-      next.smtp.port = port;
-    }
-    if (s.secure !== undefined) next.smtp.secure = Boolean(s.secure);
-    if (s.user !== undefined) next.smtp.user = String(s.user).trim();
-    if (s.pass !== undefined) next.smtp.pass = String(s.pass);
-    if (s.fromEmail !== undefined) {
-      const email = String(s.fromEmail).trim();
-      if (email && !isValidEmail(email)) {
-        throw new SettingsValidationError("From email is not a valid email address");
-      }
-      next.smtp.fromEmail = email;
-    }
-    if (s.fromName !== undefined) next.smtp.fromName = String(s.fromName).trim();
-  }
-
   if (partial.scraping?.puppeteerHeadless !== undefined) {
     next.scraping.puppeteerHeadless = Boolean(partial.scraping.puppeteerHeadless);
   }
@@ -269,9 +318,106 @@ export function updateSettings(partial = {}) {
 
 // Is outbound email actually usable right now? Used at startup and by the
 // UI to show a "not configured" nudge instead of a confusing send failure.
-export function isSmtpConfigured() {
-  const { smtp } = getSettings();
-  return Boolean(smtp.host && smtp.port && smtp.user && smtp.pass && smtp.fromEmail);
+export function isEmailConfigured() {
+  return getSettings().emailAccounts.accounts.some(
+    (a) => a.host && a.port && a.user && a.pass && a.fromEmail
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Email accounts (multi-account: one per sender/domain). Campaigns pick one
+// of these by id for a given send rather than there being a single global
+// "the" SMTP connection.
+// ---------------------------------------------------------------------------
+
+export function listEmailAccounts() {
+  return getSettings().emailAccounts.accounts.map(redactEmailAccount);
+}
+
+// Full account including the decrypted password — for internal server use
+// only (building the SMTP transporter), never sent over HTTP.
+export function getEmailAccount(accountId) {
+  const account = getSettings().emailAccounts.accounts.find((a) => a.id === accountId);
+  return account || null;
+}
+
+// The account a campaign sends from when none is explicitly picked.
+export function getDefaultEmailAccount() {
+  return getSettings().emailAccounts.accounts[0] || null;
+}
+
+function validateEmailAccountFields(fields, { requireCreds }) {
+  if (requireCreds) {
+    if (!fields.host || !String(fields.host).trim()) throw new SettingsValidationError("SMTP host is required");
+    if (!fields.user || !String(fields.user).trim()) throw new SettingsValidationError("SMTP username is required");
+    if (!fields.pass || !String(fields.pass).trim()) throw new SettingsValidationError("SMTP password is required");
+    if (!fields.fromEmail || !String(fields.fromEmail).trim()) {
+      throw new SettingsValidationError("From email is required");
+    }
+  }
+  if (fields.fromEmail && !isValidEmail(String(fields.fromEmail).trim())) {
+    throw new SettingsValidationError("From email is not a valid email address");
+  }
+  if (fields.port !== undefined && !isValidPort(Number(fields.port))) {
+    throw new SettingsValidationError("SMTP port must be between 1 and 65535");
+  }
+}
+
+export function addEmailAccount(fields = {}) {
+  validateEmailAccountFields(fields, { requireCreds: true });
+  const current = ensureLoaded();
+  const next = structuredClone(current);
+
+  const account = emptyEmailAccount({
+    label: String(fields.label || "").trim() || `Account ${next.emailAccounts.accounts.length + 1}`,
+    host: String(fields.host).trim(),
+    port: Number(fields.port) || 587,
+    secure: Boolean(fields.secure),
+    user: String(fields.user).trim(),
+    pass: String(fields.pass).trim(),
+    fromEmail: String(fields.fromEmail).trim(),
+    fromName: String(fields.fromName || "").trim() || "RapidMailer",
+  });
+
+  next.emailAccounts.accounts.push(account);
+  persist(next);
+  return redactEmailAccount(account);
+}
+
+export function updateEmailAccount(accountId, fields = {}) {
+  validateEmailAccountFields(fields, { requireCreds: false });
+  const current = ensureLoaded();
+  const next = structuredClone(current);
+  const index = next.emailAccounts.accounts.findIndex((a) => a.id === accountId);
+  if (index === -1) {
+    throw new SettingsValidationError("No email account with that id");
+  }
+
+  const account = next.emailAccounts.accounts[index];
+  if (fields.label !== undefined) account.label = String(fields.label).trim();
+  if (fields.host !== undefined) account.host = String(fields.host).trim();
+  if (fields.port !== undefined) account.port = Number(fields.port);
+  if (fields.secure !== undefined) account.secure = Boolean(fields.secure);
+  if (fields.user !== undefined) account.user = String(fields.user).trim();
+  if (fields.pass !== undefined && String(fields.pass).trim()) {
+    account.pass = String(fields.pass).trim();
+  }
+  if (fields.fromEmail !== undefined) account.fromEmail = String(fields.fromEmail).trim();
+  if (fields.fromName !== undefined) account.fromName = String(fields.fromName).trim() || "RapidMailer";
+
+  persist(next);
+  return redactEmailAccount(account);
+}
+
+export function deleteEmailAccount(accountId) {
+  const current = ensureLoaded();
+  const next = structuredClone(current);
+  const before = next.emailAccounts.accounts.length;
+  next.emailAccounts.accounts = next.emailAccounts.accounts.filter((a) => a.id !== accountId);
+  if (next.emailAccounts.accounts.length === before) {
+    throw new SettingsValidationError("No email account with that id");
+  }
+  persist(next);
 }
 
 // ---------------------------------------------------------------------------

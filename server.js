@@ -15,16 +15,17 @@ import emailSendRoute from './src/routes/emailSendRoute.js';
 import techDetectorRoute from './src/routes/techDetectorRoute.js';
 import websiteAuditRoute from './src/routes/websiteAuditRoute.js';
 import settingsRoute from './src/routes/settingsRoute.js';
+import emailAccountsRoute from './src/routes/emailAccountsRoute.js';
 import socialEnrichRoute from './src/routes/socialEnrichRoute.js';
 import whatsappRoute from './src/routes/whatsappRoute.js';
-import { isSmtpConfigured } from './src/config/settingsStore.js';
+import { isEmailConfigured } from './src/config/settingsStore.js';
 
 dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-if (!isSmtpConfigured()) {
-  console.warn('⚠️  SMTP is not configured — /api/send-emails will fail until you set it up in Settings.');
+if (!isEmailConfigured()) {
+  console.warn('⚠️  No email account is configured — /api/send-emails will fail until you add one in Email Accounts.');
 }
 
 const app = express();
@@ -74,6 +75,7 @@ app.use('/api', emailSendRoute);
 app.use('/api', techDetectorRoute);
 app.use('/api', websiteAuditRoute);
 app.use('/api', settingsRoute);
+app.use('/api', emailAccountsRoute);
 app.use('/api', socialEnrichRoute);
 app.use('/api', whatsappRoute);
 
