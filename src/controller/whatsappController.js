@@ -1,9 +1,12 @@
 import axios from "axios";
-import { getSettings, updateSettings } from "../config/settingsStore.js";
+import { getWhatsappAccount, updateWhatsappAccount } from "../config/settingsStore.js";
 
 // WhatsApp Business Cloud API (Meta's official API — not an unofficial
 // QR-linked client). Every call here talks to graph.facebook.com using the
-// access token + phone number id saved in Settings > WhatsApp.
+// access token + phone number id of ONE saved account (RapidMailer supports
+// connecting several — one per client/project — and every call into this
+// module is told which account to use via an accountId; there is no single
+// global "the" WhatsApp connection).
 //
 // IMPORTANT LIMITATION, by design of the official API (confirmed against
 // Meta's current docs while building this): there is no endpoint that lets
@@ -76,15 +79,19 @@ export async function fetchWhatsappSenderInfo({ accessToken, phoneNumberId, apiV
   return { ok: false, error: message };
 }
 
-// Tests the saved (or a draft) connection and, on success, caches the
-// verified display name/number back into settings.json so the UI can show
-// "Connected as <name> · <number>" without re-calling Meta on every load.
+// Tests a connection — either a not-yet-saved draft (accessToken +
+// phoneNumberId passed directly, used by "Test" before "Add Account") or an
+// already-saved account (accountId, optionally with fields to override,
+// used by "Re-test" on a saved card). On success, caches the verified
+// display name/number back onto the saved account (if there is one) so the
+// UI can show "Connected as <name> · <number>" without re-calling Meta on
+// every load.
 export async function testWhatsappConnection(draft = {}) {
-  const stored = getSettings().whatsapp;
+  const stored = draft.accountId ? getWhatsappAccount(draft.accountId) : null;
   const creds = {
-    accessToken: draft.accessToken || stored.accessToken,
-    phoneNumberId: draft.phoneNumberId || stored.phoneNumberId,
-    apiVersion: draft.apiVersion || stored.apiVersion,
+    accessToken: draft.accessToken || stored?.accessToken,
+    phoneNumberId: draft.phoneNumberId || stored?.phoneNumberId,
+    apiVersion: draft.apiVersion || stored?.apiVersion,
   };
 
   if (!creds.accessToken || !creds.phoneNumberId) {
@@ -92,12 +99,10 @@ export async function testWhatsappConnection(draft = {}) {
   }
 
   const info = await fetchWhatsappSenderInfo(creds);
-  if (info.ok) {
-    updateSettings({
-      whatsapp: {
-        verifiedDisplayName: info.verifiedName,
-        verifiedPhoneNumber: info.displayPhoneNumber,
-      },
+  if (info.ok && draft.accountId) {
+    updateWhatsappAccount(draft.accountId, {
+      verifiedDisplayName: info.verifiedName,
+      verifiedPhoneNumber: info.displayPhoneNumber,
     });
   }
   return info;
@@ -168,12 +173,18 @@ function buildMessagePayload(to, message) {
  *   must carry a phone number under `phone` (already resolved by the caller
  *   via flexible column detection) plus whatever fields the template needs.
  * @param {{mode: 'template'|'text', templateName?, templateLanguage?, bodyParamFields?: string[], text?}} message
- * @param {{batchSize?: number, delayMs?: number}} options
+ * @param {{accountId: string, batchSize?: number, delayMs?: number, defaultCountryCode?: string}} options
  */
 export async function sendBulkWhatsapp(recipients, message, options = {}) {
-  const settings = getSettings().whatsapp;
-  if (!settings.accessToken || !settings.phoneNumberId) {
-    const err = new Error("WhatsApp is not connected. Connect it from the sidebar first.");
+  if (!options.accountId) {
+    const err = new Error("Pick which connected WhatsApp account to send from.");
+    err.code = "NOT_CONFIGURED";
+    throw err;
+  }
+
+  const account = getWhatsappAccount(options.accountId);
+  if (!account || !account.accessToken || !account.phoneNumberId) {
+    const err = new Error("That WhatsApp account isn't connected. Connect it from the sidebar first.");
     err.code = "NOT_CONFIGURED";
     throw err;
   }
@@ -182,9 +193,9 @@ export async function sendBulkWhatsapp(recipients, message, options = {}) {
   const delayMs = Math.min(Math.max(Number(options.delayMs) || 2000, 500), 60000);
 
   const creds = {
-    accessToken: settings.accessToken,
-    phoneNumberId: settings.phoneNumberId,
-    apiVersion: settings.apiVersion,
+    accessToken: account.accessToken,
+    phoneNumberId: account.phoneNumberId,
+    apiVersion: account.apiVersion,
   };
 
   const results = new Array(recipients.length);

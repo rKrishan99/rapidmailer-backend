@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { encryptSecret, decryptSecret } from "../utils/crypto.js";
 
@@ -19,9 +20,36 @@ function isValidEmail(email) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
+function newAccountId() {
+  return `wa_${crypto.randomBytes(8).toString("hex")}`;
+}
+
+function emptyWhatsappAccount(overrides = {}) {
+  return {
+    id: newAccountId(),
+    label: "",
+    accessToken: "",
+    phoneNumberId: "",
+    wabaId: "",
+    apiVersion: "v22.0",
+    // Cached from the last successful "test connection" call, purely for
+    // display in the UI — never trusted for auth decisions.
+    verifiedDisplayName: "",
+    verifiedPhoneNumber: "",
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
 // .env values are only used to seed settings.json the first time it's
-// created — after that, settings.json (editable live via the UI) wins.
+// created — after that, settings.json (editable live via the UI) wins. A
+// single account is seeded from .env if any WHATSAPP_* var is set, so an
+// existing single-account .env setup keeps working; from then on, accounts
+// are managed entirely through the UI (multiple accounts, one per client).
 function defaultsFromEnv() {
+  const envHasWhatsapp =
+    process.env.WHATSAPP_ACCESS_TOKEN || process.env.WHATSAPP_PHONE_NUMBER_ID;
+
   return {
     smtp: {
       host: process.env.SMTP_HOST || "",
@@ -39,21 +67,49 @@ function defaultsFromEnv() {
       googlePageSpeedApiKey: process.env.GOOGLE_PAGESPEED_API_KEY || "",
     },
     whatsapp: {
-      accessToken: process.env.WHATSAPP_ACCESS_TOKEN || "",
-      phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || "",
-      wabaId: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || "",
-      apiVersion: process.env.WHATSAPP_API_VERSION || "v22.0",
-      // Cached from the last successful "test connection" call, purely for
-      // display in the UI — never trusted for auth decisions.
-      verifiedDisplayName: "",
-      verifiedPhoneNumber: "",
+      accounts: envHasWhatsapp
+        ? [
+            emptyWhatsappAccount({
+              label: "Default",
+              accessToken: process.env.WHATSAPP_ACCESS_TOKEN || "",
+              phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || "",
+              wabaId: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || "",
+              apiVersion: process.env.WHATSAPP_API_VERSION || "v22.0",
+            }),
+          ]
+        : [],
     },
   };
+}
+
+// Older settings.json files stored a single WhatsApp account inline
+// (whatsapp.accessToken / whatsapp.phoneNumberId etc, no accounts array).
+// Migrates that shape into a one-item accounts array the first time it's
+// read, so nobody who connected WhatsApp before multi-account support loses
+// their saved connection.
+function migrateWhatsappShape(raw) {
+  if (raw?.whatsapp?.accounts) return raw.whatsapp.accounts;
+  if (raw?.whatsapp?.accessToken || raw?.whatsapp?.phoneNumberId) {
+    return [
+      emptyWhatsappAccount({
+        label: "Default",
+        accessToken: raw.whatsapp.accessToken || "",
+        phoneNumberId: raw.whatsapp.phoneNumberId || "",
+        wabaId: raw.whatsapp.wabaId || "",
+        apiVersion: raw.whatsapp.apiVersion || "v22.0",
+        verifiedDisplayName: raw.whatsapp.verifiedDisplayName || "",
+        verifiedPhoneNumber: raw.whatsapp.verifiedPhoneNumber || "",
+      }),
+    ];
+  }
+  return [];
 }
 
 function readFromDisk() {
   const raw = JSON.parse(fs.readFileSync(SETTINGS_FILE, "utf8"));
   const defaults = defaultsFromEnv();
+
+  const rawAccounts = migrateWhatsappShape(raw);
 
   return {
     smtp: {
@@ -70,11 +126,14 @@ function readFromDisk() {
         : defaults.integrations.googlePageSpeedApiKey,
     },
     whatsapp: {
-      ...defaults.whatsapp,
-      ...raw.whatsapp,
-      accessToken: raw.whatsapp?.accessToken
-        ? decryptSecret(raw.whatsapp.accessToken)
-        : defaults.whatsapp.accessToken,
+      accounts:
+        rawAccounts.length > 0
+          ? rawAccounts.map((acc) => ({
+              ...emptyWhatsappAccount(),
+              ...acc,
+              accessToken: acc.accessToken ? decryptSecret(acc.accessToken) : "",
+            }))
+          : defaults.whatsapp.accounts,
     },
   };
 }
@@ -88,8 +147,10 @@ function writeToDisk(settings) {
       googlePageSpeedApiKey: encryptSecret(settings.integrations.googlePageSpeedApiKey),
     },
     whatsapp: {
-      ...settings.whatsapp,
-      accessToken: encryptSecret(settings.whatsapp.accessToken),
+      accounts: settings.whatsapp.accounts.map((acc) => ({
+        ...acc,
+        accessToken: encryptSecret(acc.accessToken),
+      })),
     },
   };
 
@@ -120,10 +181,31 @@ function ensureLoaded() {
   return cache;
 }
 
+function persist(next) {
+  writeToDisk(next);
+  cache = next;
+}
+
 // Full settings including decrypted secrets — for internal server use only.
-// Never send this straight back over HTTP; use getPublicSettings() instead.
+// Never send this straight back over HTTP; use getPublicSettings() /
+// listWhatsappAccounts() instead.
 export function getSettings() {
   return structuredClone(ensureLoaded());
+}
+
+function redactWhatsappAccount(acc) {
+  return {
+    id: acc.id,
+    label: acc.label,
+    phoneNumberId: acc.phoneNumberId,
+    wabaId: acc.wabaId,
+    apiVersion: acc.apiVersion,
+    accessTokenConfigured: Boolean(acc.accessToken),
+    verifiedDisplayName: acc.verifiedDisplayName,
+    verifiedPhoneNumber: acc.verifiedPhoneNumber,
+    connected: Boolean(acc.accessToken && acc.phoneNumberId),
+    createdAt: acc.createdAt,
+  };
 }
 
 export function getPublicSettings() {
@@ -143,13 +225,7 @@ export function getPublicSettings() {
       googlePageSpeedApiKeyConfigured: Boolean(s.integrations.googlePageSpeedApiKey),
     },
     whatsapp: {
-      phoneNumberId: s.whatsapp.phoneNumberId,
-      wabaId: s.whatsapp.wabaId,
-      apiVersion: s.whatsapp.apiVersion,
-      accessTokenConfigured: Boolean(s.whatsapp.accessToken),
-      verifiedDisplayName: s.whatsapp.verifiedDisplayName,
-      verifiedPhoneNumber: s.whatsapp.verifiedPhoneNumber,
-      connected: Boolean(s.whatsapp.accessToken && s.whatsapp.phoneNumberId),
+      accounts: s.whatsapp.accounts.map(redactWhatsappAccount),
     },
   };
 }
@@ -187,22 +263,7 @@ export function updateSettings(partial = {}) {
     next.integrations.googlePageSpeedApiKey = String(partial.integrations.googlePageSpeedApiKey);
   }
 
-  if (partial.whatsapp) {
-    const w = partial.whatsapp;
-    if (w.accessToken !== undefined) next.whatsapp.accessToken = String(w.accessToken).trim();
-    if (w.phoneNumberId !== undefined) next.whatsapp.phoneNumberId = String(w.phoneNumberId).trim();
-    if (w.wabaId !== undefined) next.whatsapp.wabaId = String(w.wabaId).trim();
-    if (w.apiVersion !== undefined) next.whatsapp.apiVersion = String(w.apiVersion).trim() || "v22.0";
-    if (w.verifiedDisplayName !== undefined) {
-      next.whatsapp.verifiedDisplayName = String(w.verifiedDisplayName).trim();
-    }
-    if (w.verifiedPhoneNumber !== undefined) {
-      next.whatsapp.verifiedPhoneNumber = String(w.verifiedPhoneNumber).trim();
-    }
-  }
-
-  writeToDisk(next);
-  cache = next;
+  persist(next);
   return getPublicSettings();
 }
 
@@ -213,10 +274,90 @@ export function isSmtpConfigured() {
   return Boolean(smtp.host && smtp.port && smtp.user && smtp.pass && smtp.fromEmail);
 }
 
-// Same idea for WhatsApp: an access token + phone number id are the two
-// things every Graph API call needs. The WABA id is only needed for
-// template-management calls, not for sending, so it's not required here.
+// ---------------------------------------------------------------------------
+// WhatsApp accounts (multi-account: one per client/project). Every WhatsApp
+// tool picks one of these by id for a given run rather than there being a
+// single global "the" WhatsApp connection.
+// ---------------------------------------------------------------------------
+
+export function listWhatsappAccounts() {
+  return getSettings().whatsapp.accounts.map(redactWhatsappAccount);
+}
+
+// Full account including the decrypted access token — for internal server
+// use only (building the Graph API request), never sent over HTTP.
+export function getWhatsappAccount(accountId) {
+  const account = getSettings().whatsapp.accounts.find((a) => a.id === accountId);
+  return account || null;
+}
+
 export function isWhatsappConfigured() {
-  const { whatsapp } = getSettings();
-  return Boolean(whatsapp.accessToken && whatsapp.phoneNumberId);
+  return getSettings().whatsapp.accounts.some((a) => a.accessToken && a.phoneNumberId);
+}
+
+function validateWhatsappFields(fields, { requireCreds }) {
+  if (requireCreds) {
+    if (!fields.accessToken || !String(fields.accessToken).trim()) {
+      throw new SettingsValidationError("Access token is required");
+    }
+    if (!fields.phoneNumberId || !String(fields.phoneNumberId).trim()) {
+      throw new SettingsValidationError("Phone Number ID is required");
+    }
+  }
+}
+
+export function addWhatsappAccount(fields = {}) {
+  validateWhatsappFields(fields, { requireCreds: true });
+  const current = ensureLoaded();
+  const next = structuredClone(current);
+
+  const account = emptyWhatsappAccount({
+    label: String(fields.label || "").trim() || `Account ${next.whatsapp.accounts.length + 1}`,
+    accessToken: String(fields.accessToken).trim(),
+    phoneNumberId: String(fields.phoneNumberId).trim(),
+    wabaId: String(fields.wabaId || "").trim(),
+    apiVersion: String(fields.apiVersion || "").trim() || "v22.0",
+  });
+
+  next.whatsapp.accounts.push(account);
+  persist(next);
+  return redactWhatsappAccount(account);
+}
+
+export function updateWhatsappAccount(accountId, fields = {}) {
+  const current = ensureLoaded();
+  const next = structuredClone(current);
+  const index = next.whatsapp.accounts.findIndex((a) => a.id === accountId);
+  if (index === -1) {
+    throw new SettingsValidationError("No WhatsApp account with that id");
+  }
+
+  const account = next.whatsapp.accounts[index];
+  if (fields.label !== undefined) account.label = String(fields.label).trim();
+  if (fields.accessToken !== undefined && String(fields.accessToken).trim()) {
+    account.accessToken = String(fields.accessToken).trim();
+  }
+  if (fields.phoneNumberId !== undefined) account.phoneNumberId = String(fields.phoneNumberId).trim();
+  if (fields.wabaId !== undefined) account.wabaId = String(fields.wabaId).trim();
+  if (fields.apiVersion !== undefined) account.apiVersion = String(fields.apiVersion).trim() || "v22.0";
+  if (fields.verifiedDisplayName !== undefined) {
+    account.verifiedDisplayName = String(fields.verifiedDisplayName).trim();
+  }
+  if (fields.verifiedPhoneNumber !== undefined) {
+    account.verifiedPhoneNumber = String(fields.verifiedPhoneNumber).trim();
+  }
+
+  persist(next);
+  return redactWhatsappAccount(account);
+}
+
+export function deleteWhatsappAccount(accountId) {
+  const current = ensureLoaded();
+  const next = structuredClone(current);
+  const before = next.whatsapp.accounts.length;
+  next.whatsapp.accounts = next.whatsapp.accounts.filter((a) => a.id !== accountId);
+  if (next.whatsapp.accounts.length === before) {
+    throw new SettingsValidationError("No WhatsApp account with that id");
+  }
+  persist(next);
 }
