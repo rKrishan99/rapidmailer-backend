@@ -15,6 +15,8 @@ import emailSendRoute from './src/routes/emailSendRoute.js';
 import techDetectorRoute from './src/routes/techDetectorRoute.js';
 import websiteAuditRoute from './src/routes/websiteAuditRoute.js';
 import settingsRoute from './src/routes/settingsRoute.js';
+import socialEnrichRoute from './src/routes/socialEnrichRoute.js';
+import whatsappRoute from './src/routes/whatsappRoute.js';
 import { isSmtpConfigured } from './src/config/settingsStore.js';
 
 dotenv.config();
@@ -72,6 +74,8 @@ app.use('/api', emailSendRoute);
 app.use('/api', techDetectorRoute);
 app.use('/api', websiteAuditRoute);
 app.use('/api', settingsRoute);
+app.use('/api', socialEnrichRoute);
+app.use('/api', whatsappRoute);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });

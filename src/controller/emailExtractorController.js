@@ -48,4 +48,49 @@ async function extractEmailsFromWebsite(website) {
   }
 }
 
+/**
+ * Bulk email-finder for an EXISTING list of leads (e.g. a Google Maps export
+ * that already has name/address/website columns) — unlike /extract-emails,
+ * this does not start a fresh Google Search. It just walks each lead's
+ * `website` field and fills in emails, using limited concurrency so a list
+ * of 100+ leads doesn't fire 100+ simultaneous requests.
+ *
+ * Each input lead is returned unchanged plus two new fields:
+ *   - emails: string[]  (every address found on the site)
+ *   - email:  string    (the first one, for direct use in the CSV pipeline)
+ *
+ * A lead with no real website (missing, or the literal "No Website" the
+ * Google Maps scraper writes) is passed through untouched — no request is
+ * made for it.
+ */
+export async function enrichLeadsWithEmails(leads, concurrency = 5) {
+  const queue = leads.map((lead, index) => ({ lead, index }));
+  const results = new Array(leads.length);
+
+  async function worker() {
+    while (queue.length > 0) {
+      const item = queue.shift();
+      if (!item) continue;
+      const { lead, index } = item;
+
+      const website = (lead.website || lead.url || "").toString().trim();
+      const isRealWebsite = website && website.toLowerCase() !== "no website";
+
+      if (!isRealWebsite) {
+        results[index] = { ...lead, emails: [], email: lead.email || "" };
+        continue;
+      }
+
+      const url = /^https?:\/\//i.test(website) ? website : `https://${website}`;
+      const emails = await extractEmailsFromWebsite(url);
+      results[index] = { ...lead, emails, email: emails[0] || lead.email || "" };
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, leads.length) }, worker);
+  await Promise.all(workers);
+
+  return results;
+}
+
 export default extractEmailsFromWebsite;

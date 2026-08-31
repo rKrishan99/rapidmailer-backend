@@ -38,6 +38,16 @@ function defaultsFromEnv() {
     integrations: {
       googlePageSpeedApiKey: process.env.GOOGLE_PAGESPEED_API_KEY || "",
     },
+    whatsapp: {
+      accessToken: process.env.WHATSAPP_ACCESS_TOKEN || "",
+      phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || "",
+      wabaId: process.env.WHATSAPP_BUSINESS_ACCOUNT_ID || "",
+      apiVersion: process.env.WHATSAPP_API_VERSION || "v22.0",
+      // Cached from the last successful "test connection" call, purely for
+      // display in the UI — never trusted for auth decisions.
+      verifiedDisplayName: "",
+      verifiedPhoneNumber: "",
+    },
   };
 }
 
@@ -59,6 +69,13 @@ function readFromDisk() {
         ? decryptSecret(raw.integrations.googlePageSpeedApiKey)
         : defaults.integrations.googlePageSpeedApiKey,
     },
+    whatsapp: {
+      ...defaults.whatsapp,
+      ...raw.whatsapp,
+      accessToken: raw.whatsapp?.accessToken
+        ? decryptSecret(raw.whatsapp.accessToken)
+        : defaults.whatsapp.accessToken,
+    },
   };
 }
 
@@ -69,6 +86,10 @@ function writeToDisk(settings) {
     integrations: {
       ...settings.integrations,
       googlePageSpeedApiKey: encryptSecret(settings.integrations.googlePageSpeedApiKey),
+    },
+    whatsapp: {
+      ...settings.whatsapp,
+      accessToken: encryptSecret(settings.whatsapp.accessToken),
     },
   };
 
@@ -121,6 +142,15 @@ export function getPublicSettings() {
     integrations: {
       googlePageSpeedApiKeyConfigured: Boolean(s.integrations.googlePageSpeedApiKey),
     },
+    whatsapp: {
+      phoneNumberId: s.whatsapp.phoneNumberId,
+      wabaId: s.whatsapp.wabaId,
+      apiVersion: s.whatsapp.apiVersion,
+      accessTokenConfigured: Boolean(s.whatsapp.accessToken),
+      verifiedDisplayName: s.whatsapp.verifiedDisplayName,
+      verifiedPhoneNumber: s.whatsapp.verifiedPhoneNumber,
+      connected: Boolean(s.whatsapp.accessToken && s.whatsapp.phoneNumberId),
+    },
   };
 }
 
@@ -157,6 +187,20 @@ export function updateSettings(partial = {}) {
     next.integrations.googlePageSpeedApiKey = String(partial.integrations.googlePageSpeedApiKey);
   }
 
+  if (partial.whatsapp) {
+    const w = partial.whatsapp;
+    if (w.accessToken !== undefined) next.whatsapp.accessToken = String(w.accessToken).trim();
+    if (w.phoneNumberId !== undefined) next.whatsapp.phoneNumberId = String(w.phoneNumberId).trim();
+    if (w.wabaId !== undefined) next.whatsapp.wabaId = String(w.wabaId).trim();
+    if (w.apiVersion !== undefined) next.whatsapp.apiVersion = String(w.apiVersion).trim() || "v22.0";
+    if (w.verifiedDisplayName !== undefined) {
+      next.whatsapp.verifiedDisplayName = String(w.verifiedDisplayName).trim();
+    }
+    if (w.verifiedPhoneNumber !== undefined) {
+      next.whatsapp.verifiedPhoneNumber = String(w.verifiedPhoneNumber).trim();
+    }
+  }
+
   writeToDisk(next);
   cache = next;
   return getPublicSettings();
@@ -167,4 +211,12 @@ export function updateSettings(partial = {}) {
 export function isSmtpConfigured() {
   const { smtp } = getSettings();
   return Boolean(smtp.host && smtp.port && smtp.user && smtp.pass && smtp.fromEmail);
+}
+
+// Same idea for WhatsApp: an access token + phone number id are the two
+// things every Graph API call needs. The WABA id is only needed for
+// template-management calls, not for sending, so it's not required here.
+export function isWhatsappConfigured() {
+  const { whatsapp } = getSettings();
+  return Boolean(whatsapp.accessToken && whatsapp.phoneNumberId);
 }
