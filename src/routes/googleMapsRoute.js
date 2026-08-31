@@ -3,7 +3,14 @@ import { scrapeGoogleMaps } from "../scrapers/googleMapScraper.js";
 
 const router = express.Router();
 
-const MAX_RESULTS = 100;
+// Google's own Maps UI stops adding new local-pack results somewhere
+// around 100-120 per search, no matter how far you scroll — that's a
+// ceiling Google enforces, not a RapidMailer limit. A single keyword +
+// location search topping out here is expected, especially for a
+// smaller city or a narrow keyword; it isn't a bug. To actually get a
+// big bulk total, run more searches (more cities, more keyword
+// variants) rather than expecting one search to return everything.
+const MAX_RESULTS = 120;
 
 // POST (not GET): launches Puppeteer and scrapes Google as a side effect,
 // so it needs the CORS preflight a JSON body gets rather than being
@@ -18,11 +25,14 @@ router.post("/google-maps", async (req, res) => {
         .json({ error: "Query and location are required!" });
     }
 
-    const parsedLimit = limit ? parseInt(limit, 10) : 10;
+    // No `limit` sent (the frontend doesn't expose one) now means "give me
+    // everything Google will actually return for this search", i.e.
+    // MAX_RESULTS, instead of the old token default of 10.
+    const parsedLimit = limit ? parseInt(limit, 10) : MAX_RESULTS;
     const results = await scrapeGoogleMaps(
       query,
       location,
-      Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), MAX_RESULTS) : 10
+      Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), MAX_RESULTS) : MAX_RESULTS
     );
     res.json({ results });
 
