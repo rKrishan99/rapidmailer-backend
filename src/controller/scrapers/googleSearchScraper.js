@@ -1,0 +1,70 @@
+import puppeteer from "puppeteer";
+import { getSettings } from "../../config/settingsStore.js";
+import { trackBrowser, untrackBrowser, isMissingBrowserError } from "../../utils/browserRegistry.js";
+
+async function scrapeGoogleSearch(keyword, location, maxResults = 10) {
+    let browser;
+    try {
+      browser = await puppeteer.launch({
+        headless: getSettings().scraping.puppeteerHeadless,
+        args: [
+          "--no-sandbox",
+          "--disable-setuid-sandbox",
+          "--disable-blink-features=AutomationControlled",
+        ],
+      });
+    } catch (err) {
+      if (isMissingBrowserError(err)) {
+        throw new Error("SCRAPER_ENGINE_MISSING");
+      }
+      throw err;
+    }
+    trackBrowser(browser);
+
+    try {
+      const page = await browser.newPage();
+
+      await page.setUserAgent(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+      );
+
+      const searchQuery = location ? `${keyword} in ${location}` : keyword;
+      const url = `https://www.google.com/search?q=${encodeURIComponent(searchQuery)}`;
+
+      console.log(`🔍 Searching Google: ${searchQuery}`);
+      await page.goto(url, { waitUntil: "networkidle2", timeout: 120000 });
+
+      console.log("Waiting for h3 elements...");
+      await page.waitForSelector("h3", { timeout: 60000 });
+
+      const results = await page.evaluate(() => {
+        const data = [];
+        const items = document.querySelectorAll("div.MjjYud"); // Updated selector
+
+        items.forEach((item) => {
+          const titleElement = item.querySelector("h3");
+          const linkElement = item.querySelector("a");
+          const isSponsored =
+            item.innerText.includes("Sponsored") || item.innerText.includes("My Ad Centre");
+
+          if (titleElement && linkElement && !isSponsored) {
+            data.push({
+              name: titleElement.innerText.trim(),
+              website: linkElement.href.trim(),
+            });
+          }
+        });
+
+        console.log("Founded website list:", data);
+
+        return data;
+      });
+
+      return results.slice(0, maxResults);
+    } finally {
+      untrackBrowser(browser);
+      await browser.close().catch(() => {});
+    }
+  }
+
+export default scrapeGoogleSearch;
