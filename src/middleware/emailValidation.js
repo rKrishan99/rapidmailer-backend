@@ -1,49 +1,115 @@
 // src/middleware/emailValidation.js
-import { validateEmail } from "../utils/emailValidator.js";
+//
+// Production-grade approach: never block a campaign because SOME addresses
+// are invalid — real-world CSVs always contain dirty data. Instead, sanitize
+// and strip bad rows, then let the send proceed with the valid ones. The
+// controller's response already includes per-recipient sent/failed stats so
+// the user always knows exactly what happened.
+//
+// The only hard rejections are structural errors (missing array, wrong type)
+// that indicate a bug in the client, not dirty user data.
+//
+// Sanitization pipeline (applied per cell before the format validator):
+//   1. URL-decode percent-encoded sequences (%20, %40, …)
+//   2. Strip trailing non-email words (e.g. "website", "location")
+//   3. Split multi-value delimiters (;  ,  space  newline  |)
+//   4. Block junk tokens (.gif, example.com, sentry.io, noreply.*, …)
+//   5. RFC format check via validateEmail()
 
-// The send endpoint supports two request shapes: the original blast mode
-// ({ emails: [...] }) and the newer personalized mail-merge mode
-// ({ mode: 'personalized', records: [{ email, ... }] }). This only validates
-// email format for whichever shape is actually present — it does not
-// require `emails` when the request is personalized, and vice versa.
+import { validateEmail } from '../utils/emailValidator.js';
+import { sanitizeEmailCell } from '../utils/emailSanitizer.js';
+
 export const validateEmails = (req, res, next) => {
   const { emails, mode, records } = req.body;
 
-  if (mode === "personalized") {
+  if (mode === 'personalized') {
     if (!records || !Array.isArray(records)) {
-      return res.status(400).json({ error: "records array is required for personalized mode" });
+      return res.status(400).json({ error: 'records array is required for personalized mode' });
     }
 
-    const withEmail = records.filter((r) => r && r.email);
-    const invalidEmails = withEmail.filter((r) => !validateEmail(r.email)).map((r) => r.email);
+    const originalLength = records.length;
+    const skippedRows = [];  // rows that were dropped — sent back to the UI
+    const cleanRecords = [];
 
-    if (invalidEmails.length > 0) {
+    for (const r of records) {
+      if (!r || !r.email) {
+        skippedRows.push({
+          email: r?.email ?? '',
+          domain: '',
+          status: 'skipped',
+          reason: 'Missing email field',
+          timestamp: new Date().toISOString(),
+        });
+        continue;
+      }
+
+      const cleaned = sanitizeEmailCell(r.email);
+
+      if (!cleaned) {
+        skippedRows.push({
+          email: String(r.email).trim(),
+          domain: '',
+          status: 'skipped',
+          reason: 'Invalid or blocked email address',
+          timestamp: new Date().toISOString(),
+        });
+        continue;
+      }
+
+      // Re-attach the sanitized address so the controller always has a clean value.
+      cleanRecords.push({ ...r, email: cleaned });
+    }
+
+    if (cleanRecords.length === 0) {
       return res.status(400).json({
-        error: "Some records have an invalid email",
-        invalidEmails,
-        validCount: withEmail.length - invalidEmails.length,
-        invalidCount: invalidEmails.length,
+        error:
+          'None of the provided records contain a valid email address. ' +
+          'Please check that you selected the correct email column and that the ' +
+          'column contains properly formatted addresses (e.g. user@example.com).',
       });
     }
+
+    req.body.records = cleanRecords;
+    req.body._skippedRecords = originalLength - cleanRecords.length;
+    req.body._skippedRows = skippedRows;
 
     return next();
   }
 
+  // ── Blast mode ────────────────────────────────────────────────────────────
   if (!emails || !Array.isArray(emails)) {
-    return res.status(400).json({ error: "Emails array is required" });
+    return res.status(400).json({ error: 'Emails array is required' });
   }
 
-  // Validate each email format
-  const invalidEmails = emails.filter((email) => !validateEmail(email));
+  const skippedRows = [];
+  const cleanEmails = [];
 
-  if (invalidEmails.length > 0) {
+  for (const raw of emails) {
+    const cleaned = sanitizeEmailCell(raw);
+    if (cleaned) {
+      cleanEmails.push(cleaned);
+    } else {
+      skippedRows.push({
+        email: String(raw || '').trim(),
+        domain: '',
+        status: 'skipped',
+        reason: 'Invalid or blocked email address',
+        timestamp: new Date().toISOString(),
+      });
+    }
+  }
+
+  if (cleanEmails.length === 0) {
     return res.status(400).json({
-      error: "Some emails are invalid",
-      invalidEmails,
-      validCount: emails.length - invalidEmails.length,
-      invalidCount: invalidEmails.length,
+      error:
+        'None of the provided email addresses are valid. ' +
+        'Please check your CSV and ensure it contains properly formatted addresses.',
     });
   }
+
+  req.body.emails = cleanEmails;
+  req.body._skippedEmails = emails.length - cleanEmails.length;
+  req.body._skippedRows = skippedRows;
 
   next();
 };
