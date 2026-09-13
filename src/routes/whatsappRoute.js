@@ -1,3 +1,4 @@
+// src/routes/whatsappRoute.js
 import express from "express";
 import {
   listWhatsappAccounts,
@@ -6,23 +7,56 @@ import {
   deleteWhatsappAccount,
   SettingsValidationError,
 } from "../config/settingsStore.js";
-import { testWhatsappConnection, sendBulkWhatsapp } from "../controller/whatsappController.js";
+import {
+  initSession,
+  getSessionStatus,
+  subscribeSessionUpdates,
+  logoutSession,
+} from "../controller/whatsappSessionManager.js";
+import {
+  filterWhatsappNumbers,
+  sendBulkWhatsapp,
+} from "../controller/whatsappController.js";
 
 const router = express.Router();
 
-const MAX_BULK_RECIPIENTS = 300;
+const MAX_BULK_RECIPIENTS = 500;
 
-// --- Accounts (multi-account: one per client/project) ---------------------
+// ---------------------------------------------------------------------------
+// Accounts & Sessions Management (QR-based multi-account)
+// ---------------------------------------------------------------------------
 
+// List all accounts enriched with live session status
 router.get("/whatsapp/accounts", (req, res) => {
-  res.json({ accounts: listWhatsappAccounts() });
+  const accounts = listWhatsappAccounts();
+  const enriched = accounts.map((acc) => {
+    const live = getSessionStatus(acc.id);
+    return {
+      ...acc,
+      liveStatus: live.status,
+      connected: live.status === "connected" || acc.connected,
+      activeUser: live.user || null,
+    };
+  });
+  res.json({ accounts: enriched });
 });
 
-router.post("/whatsapp/accounts", (req, res) => {
+// Create a new WhatsApp Account draft and initialize session for QR generation
+router.post("/whatsapp/accounts", async (req, res) => {
   try {
-    const { label, accessToken, phoneNumberId, wabaId, apiVersion } = req.body || {};
-    const account = addWhatsappAccount({ label, accessToken, phoneNumberId, wabaId, apiVersion });
-    res.status(201).json({ account, message: "WhatsApp account added" });
+    const { label } = req.body || {};
+    const account = addWhatsappAccount({
+      label: label || "New WhatsApp Account",
+      accessToken: "qr_managed",
+      phoneNumberId: "qr_managed",
+    });
+
+    // Start session in background for QR code generation
+    initSession(account.id).catch((err) => {
+      console.error(`Error auto-initializing session for ${account.id}:`, err.message);
+    });
+
+    res.status(201).json({ account, message: "WhatsApp account created" });
   } catch (error) {
     if (error instanceof SettingsValidationError) {
       return res.status(400).json({ error: error.message });
@@ -32,16 +66,11 @@ router.post("/whatsapp/accounts", (req, res) => {
   }
 });
 
+// Update an account label
 router.put("/whatsapp/accounts/:id", (req, res) => {
   try {
-    const { label, accessToken, phoneNumberId, wabaId, apiVersion } = req.body || {};
-    const account = updateWhatsappAccount(req.params.id, {
-      label,
-      accessToken,
-      phoneNumberId,
-      wabaId,
-      apiVersion,
-    });
+    const { label } = req.body || {};
+    const account = updateWhatsappAccount(req.params.id, { label });
     res.json({ account, message: "WhatsApp account updated" });
   } catch (error) {
     if (error instanceof SettingsValidationError) {
@@ -52,46 +81,120 @@ router.put("/whatsapp/accounts/:id", (req, res) => {
   }
 });
 
-router.delete("/whatsapp/accounts/:id", (req, res) => {
+// Remove an account and disconnect its active session
+router.delete("/whatsapp/accounts/:id", async (req, res) => {
   try {
-    deleteWhatsappAccount(req.params.id);
+    const accountId = req.params.id;
+    await logoutSession(accountId);
+    deleteWhatsappAccount(accountId);
     res.json({ message: "WhatsApp account removed" });
   } catch (error) {
-    if (error instanceof SettingsValidationError) {
-      return res.status(400).json({ error: error.message });
-    }
     console.error("Failed to delete WhatsApp account:", error.message);
     res.status(500).json({ error: "Failed to delete WhatsApp account" });
   }
 });
 
-// Verifies a connection against the real Graph API — either a not-yet-saved
-// draft ({accessToken, phoneNumberId}) before "Add Account", or an existing
-// saved account ({accountId}) for a "Re-test" on its card.
-router.post("/whatsapp/test-connection", async (req, res) => {
+// ---------------------------------------------------------------------------
+// QR Code & Session Control Endpoints
+// ---------------------------------------------------------------------------
+
+// Trigger session init / QR generation
+router.post("/whatsapp/session/:id/init", async (req, res) => {
   try {
-    const result = await testWhatsappConnection(req.body || {});
-    if (!result.ok) {
-      return res.status(400).json({ error: result.error });
-    }
-    res.json({
-      message: `Connected to WhatsApp as "${result.verifiedName}" (${result.displayPhoneNumber})`,
-      verifiedName: result.verifiedName,
-      displayPhoneNumber: result.displayPhoneNumber,
-    });
+    const accountId = req.params.id;
+    const result = await initSession(accountId);
+    res.json(result);
   } catch (error) {
-    console.error("WhatsApp connection test failed:", error.message);
-    res.status(500).json({ error: "Failed to test the WhatsApp connection" });
+    console.error("Error initializing session:", error.message);
+    res.status(500).json({ error: error.message || "Failed to initialize session" });
   }
 });
 
-// --- Sending -----------------------------------------------------------
+// Polling status endpoint
+router.get("/whatsapp/session/:id/status", (req, res) => {
+  const status = getSessionStatus(req.params.id);
+  res.json(status);
+});
 
-// Bulk send for the WhatsApp Bulk Sender (and the Number Filter, which sends
-// too — a send attempt is the only way the official API reveals whether a
-// number is reachable). `recipients` must already carry a resolved `phone`
-// field per row. `accountId` picks which connected account sends the
-// messages — required, since RapidMailer supports multiple accounts.
+// Server-Sent Events (SSE) for real-time QR code and connection updates
+router.get("/whatsapp/session/:id/events", (req, res) => {
+  const accountId = req.params.id;
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+
+  // Send initial ping
+  res.write(`data: ${JSON.stringify({ type: "ping" })}\n\n`);
+
+  const unsubscribe = subscribeSessionUpdates(accountId, (data) => {
+    try {
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    } catch (e) {}
+  });
+
+  // Keep-alive heartbeats every 20s
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(": heartbeat\n\n");
+    } catch (e) {}
+  }, 20000);
+
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    unsubscribe();
+  });
+});
+
+// Disconnect / Log out of WhatsApp session
+router.post("/whatsapp/session/:id/logout", async (req, res) => {
+  try {
+    const accountId = req.params.id;
+    await logoutSession(accountId);
+    res.json({ message: "WhatsApp account logged out successfully" });
+  } catch (error) {
+    console.error("Failed to logout session:", error.message);
+    res.status(500).json({ error: "Failed to log out session" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// WhatsApp Number Filter (Direct protocol check: sock.onWhatsApp)
+// ---------------------------------------------------------------------------
+
+router.post("/whatsapp/filter-numbers", async (req, res) => {
+  try {
+    const { recipients, options } = req.body || {};
+
+    if (!recipients || !Array.isArray(recipients) || recipients.length === 0) {
+      return res.status(400).json({ error: "recipients (non-empty array) is required" });
+    }
+    if (recipients.length > MAX_BULK_RECIPIENTS) {
+      return res.status(400).json({ error: `Max ${MAX_BULK_RECIPIENTS} numbers per filter request.` });
+    }
+    if (!options?.accountId) {
+      return res.status(400).json({ error: "Pick which connected WhatsApp account to use." });
+    }
+
+    const result = await filterWhatsappNumbers(recipients, options);
+    res.status(200).json({
+      message: "Number filtering completed",
+      ...result,
+    });
+  } catch (error) {
+    if (error.code === "NOT_CONFIGURED" || error.code === "NOT_CONNECTED") {
+      return res.status(400).json({ error: error.message });
+    }
+    console.error("WhatsApp number filter error:", error.message);
+    res.status(500).json({ error: "Failed to verify numbers on WhatsApp" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// WhatsApp Bulk Sender (Anti-ban paced dispatch)
+// ---------------------------------------------------------------------------
+
 router.post("/whatsapp/send-bulk", async (req, res) => {
   try {
     const { recipients, message, settings } = req.body || {};
@@ -105,38 +208,19 @@ router.post("/whatsapp/send-bulk", async (req, res) => {
     if (!settings?.accountId) {
       return res.status(400).json({ error: "Pick which connected WhatsApp account to send from." });
     }
-    if (!message || (message.mode === "template" && !message.templateName)) {
-      return res
-        .status(400)
-        .json({ error: "A template name is required (create/approve it in Meta Business Manager first)." });
-    }
-    if (message.mode === "text" && !message.text) {
-      return res.status(400).json({ error: "text is required for text mode" });
-    }
-    if (message.header && message.header.type && message.header.type !== "none") {
-      if (!["image", "video"].includes(message.header.type)) {
-        return res.status(400).json({ error: "header.type must be 'image', 'video', or omitted." });
-      }
-      if (!message.header.mediaUrl && !message.header.mediaUrlField) {
-        return res
-          .status(400)
-          .json({ error: "Give a media URL, or map a CSV column that holds a per-lead media URL." });
-      }
+    if (message?.mode !== "custom_csv" && (!message?.text || !message.text.trim())) {
+      return res.status(400).json({ error: "Message text is required." });
     }
 
-    const results = await sendBulkWhatsapp(recipients, message, settings);
+    const outcome = await sendBulkWhatsapp(recipients, message, settings);
 
     res.status(200).json({
       message: "WhatsApp bulk send completed",
-      results,
-      stats: {
-        total: results.length,
-        sent: results.filter((r) => r.status === "sent").length,
-        failed: results.filter((r) => r.status === "failed").length,
-      },
+      results: outcome.results,
+      stats: outcome.stats,
     });
   } catch (error) {
-    if (error.code === "NOT_CONFIGURED") {
+    if (error.code === "NOT_CONFIGURED" || error.code === "NOT_CONNECTED") {
       return res.status(400).json({ error: error.message });
     }
     console.error("WhatsApp bulk send error:", error.message);

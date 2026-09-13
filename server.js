@@ -20,6 +20,7 @@ import socialEnrichRoute from './src/routes/socialEnrichRoute.js';
 import whatsappRoute from './src/routes/whatsappRoute.js';
 import { isEmailConfigured } from './src/config/settingsStore.js';
 import { closeAllTrackedBrowsers } from './src/utils/browserRegistry.js';
+import { autoRestoreSessions } from './src/controller/whatsappSessionManager.js';
 
 dotenv.config();
 
@@ -65,12 +66,20 @@ const allowedOrigins = (process.env.CORS_ORIGIN || '')
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow non-browser requests (curl, server-to-server) with no Origin header
-      if (!origin || allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+      // Allow non-browser requests (curl, server-to-server) or local development origins
+      if (
+        !origin ||
+        !isProduction ||
+        allowedOrigins.length === 0 ||
+        allowedOrigins.includes(origin) ||
+        origin.includes('localhost') ||
+        origin.includes('127.0.0.1')
+      ) {
         return callback(null, true);
       }
       return callback(new Error('Not allowed by CORS'));
     },
+    credentials: true,
   })
 );
 
@@ -134,8 +143,9 @@ app.use((err, req, res, next) => {
   });
 });
 
-const server = app.listen(PORT, '127.0.0.1', () => {
+const server = app.listen(PORT, () => {
   console.log(`✅ Server running on http://localhost:${PORT}`);
+  autoRestoreSessions();
 });
 
 // Node's default behavior for an unhandled 'error' event on a Server is to
@@ -146,8 +156,14 @@ const server = app.listen(PORT, '127.0.0.1', () => {
 // user an actual error dialog rather than a silently-dead backend.
 server.on('error', (err) => {
   if (err.code === 'EADDRINUSE') {
-    console.error(`⚠️  Port ${PORT} is already in use — is another copy of RapidMailer already running?`);
-    process.exit(1);
+    console.warn(`⚠️  Port ${PORT} in use, retrying in 1s...`);
+    setTimeout(() => {
+      try {
+        server.close();
+      } catch (e) {}
+      server.listen(PORT);
+    }, 1000);
+    return;
   }
   console.error('⚠️  Server error:', err.message);
   process.exit(1);
@@ -168,3 +184,8 @@ const shutdown = (signal) => {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGUSR2', () => {
+  server.close(() => {
+    process.kill(process.pid, 'SIGUSR2');
+  });
+});

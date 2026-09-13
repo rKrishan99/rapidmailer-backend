@@ -1,0 +1,11 @@
+{
+  "watch": ["src", "server.js"],
+  "ext": "js,mjs,cjs",
+  "ignore": [
+    "data/**",
+    "node_modules/**",
+    "*.log",
+    "*.tmp"
+  ],
+  "delay": 1000
+}

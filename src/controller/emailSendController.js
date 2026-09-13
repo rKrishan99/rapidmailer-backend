@@ -122,7 +122,8 @@ export const sendEmails = async (req, res) => {
       });
     }
 
-    const fromHeader = `"${smtp.fromName || 'RapidMailer'}" <${smtp.fromEmail}>`;
+    const appName = process.env.APP_NAME || 'Omini Pulse';
+    const fromHeader = `"${smtp.fromName || appName}" <${smtp.fromEmail}>`;
     const transporter = buildTransporter(smtp);
 
     // Rows dropped by the sanitization middleware — returned in the report.
