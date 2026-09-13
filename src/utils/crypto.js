@@ -3,8 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = process.env.RAPIDMAILER_DATA_DIR || path.join(__dirname, "..", "..", "data");
+import { DATA_DIR } from "../config/dataDir.js";
+
 const KEY_FILE = path.join(DATA_DIR, "settings.key");
 
 // Secrets are encrypted at rest with AES-256-GCM. The key comes from

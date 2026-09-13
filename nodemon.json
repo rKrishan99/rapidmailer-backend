@@ -1,11 +1,17 @@
-{
+﻿{
   "watch": ["src", "server.js"],
   "ext": "js,mjs,cjs",
   "ignore": [
+    "data",
     "data/**",
+    "data/*",
+    "**/data/**",
+    "**/whatsapp_sessions/**",
+    "*whatsapp_sessions*",
     "node_modules/**",
     "*.log",
-    "*.tmp"
+    "*.tmp",
+    "*.json"
   ],
-  "delay": 1000
+  "delay": 2000
 }

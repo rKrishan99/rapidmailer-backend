@@ -26,11 +26,21 @@ const MAX_BULK_RECIPIENTS = 500;
 // Accounts & Sessions Management (QR-based multi-account)
 // ---------------------------------------------------------------------------
 
-// List all accounts enriched with live session status
+// List all accounts enriched with live session status.
+// Auto-triggers initSession for accounts whose creds exist but socket is idle
+// (e.g. after a server restart) so the UI sees "connecting" → "connected" quickly.
 router.get("/whatsapp/accounts", (req, res) => {
   const accounts = listWhatsappAccounts();
   const enriched = accounts.map((acc) => {
     const live = getSessionStatus(acc.id);
+
+    // If credentials exist on disk but no active socket, silently reconnect
+    if (live.status === "saved_idle") {
+      initSession(acc.id).catch((err) =>
+        console.error(`Auto-reconnect failed for ${acc.id}:`, err.message)
+      );
+    }
+
     return {
       ...acc,
       liveStatus: live.status,
@@ -110,9 +120,18 @@ router.post("/whatsapp/session/:id/init", async (req, res) => {
   }
 });
 
-// Polling status endpoint
+// Polling status endpoint — also auto-initiates session if creds exist but socket is idle
 router.get("/whatsapp/session/:id/status", (req, res) => {
-  const status = getSessionStatus(req.params.id);
+  const accountId = req.params.id;
+  const status = getSessionStatus(accountId);
+
+  // Auto-reconnect if creds are on disk but session socket isn't active
+  if (status.status === "saved_idle") {
+    initSession(accountId).catch((err) =>
+      console.error(`Auto-reconnect (status poll) for ${accountId}:`, err.message)
+    );
+  }
+
   res.json(status);
 });
 

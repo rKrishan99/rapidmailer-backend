@@ -6,13 +6,13 @@ import makeWASocket, {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  Browsers,
 } from "@whiskeysockets/baileys";
 import QRCode from "qrcode";
 import pino from "pino";
 import { updateWhatsappAccount, getWhatsappAccount } from "../config/settingsStore.js";
+import { DATA_DIR } from "../config/dataDir.js";
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DATA_DIR = process.env.RAPIDMAILER_DATA_DIR || path.join(__dirname, "..", "..", "data");
 const SESSIONS_DIR = path.join(DATA_DIR, "whatsapp_sessions");
 
 // Ensure sessions directory exists
@@ -102,6 +102,24 @@ export async function initSession(accountId) {
   const sessionDir = path.join(SESSIONS_DIR, accountId);
   fs.mkdirSync(sessionDir, { recursive: true });
 
+  // Guard against 0-byte or corrupted session files caused by interrupted writes or server restarts
+  const credsFile = path.join(sessionDir, "creds.json");
+  if (fs.existsSync(credsFile)) {
+    try {
+      const stats = fs.statSync(credsFile);
+      if (stats.size < 5) {
+        throw new Error("Zero-byte or truncated creds.json");
+      }
+      JSON.parse(fs.readFileSync(credsFile, "utf8"));
+    } catch (corruptErr) {
+      console.warn(`⚠️ Wiping corrupted/truncated session directory for ${accountId}: ${corruptErr.message}`);
+      try {
+        fs.rmSync(sessionDir, { recursive: true, force: true });
+        fs.mkdirSync(sessionDir, { recursive: true });
+      } catch (cleanErr) {}
+    }
+  }
+
   const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
   const { version, isLatest } = await fetchLatestBaileysVersion().catch(() => ({
     version: [2, 3000, 1015901307],
@@ -115,11 +133,12 @@ export async function initSession(accountId) {
     auth: state,
     logger,
     printQRInTerminal: false,
-    browser: ["RapidMailer", "Chrome", "122.0.0"],
+    browser: Browsers.windows("Desktop"),
     syncFullHistory: false,
     generateHighQualityLinkPreview: false,
     connectTimeoutMs: 60000,
     keepAliveIntervalMs: 25000,
+    defaultQueryTimeoutMs: 60000,
   });
 
   session.sock = sock;
@@ -210,19 +229,35 @@ export async function initSession(accountId) {
         } catch (e) {}
         session.sock = null;
 
-        if (isQrEnded && !session.user) {
-          session.status = "disconnected";
-          session.error = "QR code expired. Click to refresh QR code.";
+        if (isRestartRequired) {
+          // Device has paired and credentials were saved! Baileys restarts socket to establish secure channel
+          console.log(`🔄 Finalizing WhatsApp session handshake for ${accountId}...`);
+          session.status = "connecting";
           notifyListeners(accountId);
+          setTimeout(() => {
+            initSession(accountId).catch((err) => {
+              console.error(`Post-pairing reconnect error for ${accountId}:`, err.message);
+            });
+          }, 600);
+        } else if (isQrEnded && !session.user) {
+          // QR code expired before scanning — automatically regenerate a fresh one so the screen never dies
+          console.log(`🔄 QR code expired for ${accountId}, refreshing automatically...`);
+          session.status = "connecting";
+          session.error = null;
+          notifyListeners(accountId);
+          setTimeout(() => {
+            initSession(accountId).catch((err) => {
+              console.error(`Auto-refresh QR error for ${accountId}:`, err.message);
+            });
+          }, 800);
         } else {
-          // Keep QR code visible if available, or stay in connecting state
+          // Network hiccup or normal reconnect
           if (!session.qr) {
             session.status = "connecting";
           }
           session.error = null;
           notifyListeners(accountId);
 
-          // Reconnect with debounce
           setTimeout(() => {
             if (activeSessions.get(accountId)?.status !== "connected") {
               initSession(accountId).catch((err) => {
@@ -248,9 +283,21 @@ export async function initSession(accountId) {
 export function getSessionStatus(accountId) {
   const session = activeSessions.get(accountId);
   if (!session) {
-    // Check if session directory exists on disk with saved credentials
+    // Check if session directory exists on disk with genuinely saved paired credentials
     const sessionDir = path.join(SESSIONS_DIR, accountId);
-    const hasCreds = fs.existsSync(path.join(sessionDir, "creds.json"));
+    const credsFile = path.join(sessionDir, "creds.json");
+    let hasCreds = false;
+    if (fs.existsSync(credsFile)) {
+      try {
+        const stats = fs.statSync(credsFile);
+        if (stats.size > 20) {
+          const parsed = JSON.parse(fs.readFileSync(credsFile, "utf8"));
+          hasCreds = Boolean(parsed?.me?.id);
+        }
+      } catch (e) {
+        hasCreds = false;
+      }
+    }
     return {
       accountId,
       status: hasCreds ? "saved_idle" : "disconnected",
