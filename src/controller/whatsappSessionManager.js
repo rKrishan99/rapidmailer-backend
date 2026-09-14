@@ -12,6 +12,13 @@ import QRCode from "qrcode";
 import pino from "pino";
 import { updateWhatsappAccount, getWhatsappAccount } from "../config/settingsStore.js";
 import { DATA_DIR } from "../config/dataDir.js";
+import { handleIncomingPollUpdate } from "./whatsappPollController.js";
+import { handleIncomingAutoResponse } from "./whatsappAutoResponder.js";
+import {
+  updateCachedContacts,
+  updateCachedChats,
+  recordGroupMemberActivity,
+} from "../config/whatsappStore.js";
 
 const SESSIONS_DIR = path.join(DATA_DIR, "whatsapp_sessions");
 
@@ -145,6 +152,66 @@ export async function initSession(accountId) {
 
   // Credential update handling
   sock.ev.on("creds.update", saveCreds);
+
+  // Real-time message events (Poll updates & Auto-Responder)
+  sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    if (!Array.isArray(messages)) return;
+    for (const msg of messages) {
+      try {
+        if (msg?.message?.pollUpdateMessage) {
+          await handleIncomingPollUpdate({ accountId, sock, msg });
+        } else if (!msg.key?.fromMe) {
+          await handleIncomingAutoResponse({ accountId, sock, msg });
+        }
+
+        // Track member activity for group active member filtering
+        const remoteJid = msg.key?.remoteJid || "";
+        if (remoteJid.endsWith("@g.us")) {
+          const sender = msg.key?.participant || msg.participant;
+          if (sender) {
+            const timeMs = msg.messageTimestamp
+              ? typeof msg.messageTimestamp === "number"
+                ? msg.messageTimestamp * 1000
+                : Number(msg.messageTimestamp) * 1000
+              : Date.now();
+            recordGroupMemberActivity(remoteJid, sender, timeMs);
+          }
+        }
+      } catch (err) {
+        console.warn(`⚠️ Error processing incoming message in ${accountId}:`, err.message);
+      }
+    }
+  });
+
+  // Background history & contact cache sync
+  sock.ev.on("messaging-history.set", ({ contacts, chats, messages }) => {
+    if (contacts?.length) updateCachedContacts(accountId, contacts);
+    if (chats?.length) updateCachedChats(accountId, chats);
+    if (Array.isArray(messages)) {
+      for (const m of messages) {
+        const jid = m.key?.remoteJid || "";
+        if (jid.endsWith("@g.us")) {
+          const sender = m.key?.participant || m.participant;
+          if (sender) {
+            const ts = m.messageTimestamp ? Number(m.messageTimestamp) * 1000 : Date.now();
+            recordGroupMemberActivity(jid, sender, ts);
+          }
+        }
+      }
+    }
+  });
+
+  sock.ev.on("contacts.upsert", (contacts) => {
+    if (contacts?.length) updateCachedContacts(accountId, contacts);
+  });
+
+  sock.ev.on("chats.upsert", (chats) => {
+    if (chats?.length) updateCachedChats(accountId, chats);
+  });
+
+  sock.ev.on("chats.update", (chats) => {
+    if (chats?.length) updateCachedChats(accountId, chats);
+  });
 
   // Connection update handling
   sock.ev.on("connection.update", async (update) => {

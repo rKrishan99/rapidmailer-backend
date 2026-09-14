@@ -13,7 +13,8 @@ export async function scrapeGoogleMaps(query, location, maxResults = 100) {
                 '--disable-dev-shm-usage',
                 '--disable-accelerated-2d-canvas',
                 '--disable-gpu',
-                '--window-size=1920,1080'
+                '--window-size=1920,1080',
+                '--blink-settings=imagesEnabled=false', // belt-and-braces image suppression
             ],
             defaultViewport: null,
         });
@@ -27,6 +28,18 @@ export async function scrapeGoogleMaps(query, location, maxResults = 100) {
 
     try {
         const page = await browser.newPage();
+
+        // Block heavyweight resource types — images, CSS, fonts, media.
+        // Typically cuts page memory by 60-70% and speeds up scraping significantly.
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            const type = req.resourceType();
+            if (['image', 'stylesheet', 'font', 'media'].includes(type)) {
+                req.abort();
+            } else {
+                req.continue();
+            }
+        });
 
         // Set a realistic user-agent
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36');
@@ -54,7 +67,7 @@ export async function scrapeGoogleMaps(query, location, maxResults = 100) {
         // seconds) for a smaller city that runs out sooner, and stops as
         // soon as we already have enough for the requested maxResults so a
         // small request doesn't scroll further than it needs to.
-        const MAX_SCROLL_ATTEMPTS = 25;
+        const MAX_SCROLL_ATTEMPTS = 30;
         for (let i = 0; i < MAX_SCROLL_ATTEMPTS; i++) {
             const loadedCount = await page.evaluate(() => document.querySelectorAll('.Nv2PK').length);
             if (loadedCount >= maxResults) {

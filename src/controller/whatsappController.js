@@ -8,6 +8,7 @@ import {
   sleep,
   extractDigitsFromJid,
 } from "../utils/whatsappHelper.js";
+import { registerPoll } from "./whatsappPollController.js";
 
 /**
  * Validates a list of phone numbers using WhatsApp's direct protocol lookup:
@@ -270,6 +271,25 @@ export async function sendBulkWhatsapp(recipients, messageConfig, options = {}) 
               selectableCount: Number(poll.selectableCount) || 1,
             },
           });
+          if (pollInfo?.key?.id) {
+            const encKey =
+              pollInfo.message?.pollCreationMessage?.encKey ||
+              pollInfo.message?.pollCreationMessageV2?.encKey ||
+              pollInfo.message?.pollCreationMessageV3?.encKey;
+            try {
+              registerPoll({
+                pollId: pollInfo.key.id,
+                accountId,
+                jid,
+                question: renderedPollName,
+                options: pollValues,
+                pollEncKey: encKey,
+                pollCreatorJid: sock.user?.id,
+              });
+            } catch (regErr) {
+              console.warn("Could not register poll metadata:", regErr.message);
+            }
+          }
           if (!sentInfo) sentInfo = pollInfo;
         }
       }
