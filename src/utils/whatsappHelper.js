@@ -22,13 +22,23 @@ export function parseSpintax(text) {
 
 /**
  * Replaces {{field}} placeholders using row data, then applies Spintax parsing.
+ * Supports exact match, case-insensitive match, and space/underscore normalized matching.
  */
 export function renderWhatsappMessage(template, record = {}) {
   if (!template) return "";
   let rendered = template.replace(/\{\{\s*([\w.\s-]+?)\s*\}\}/g, (match, field) => {
     const trimmed = field.trim();
-    const val = record[trimmed];
-    return val === undefined || val === null ? "" : String(val);
+    if (record[trimmed] !== undefined && record[trimmed] !== null) {
+      return String(record[trimmed]);
+    }
+    const normField = trimmed.toLowerCase().replace(/[\s_-]+/g, "");
+    const foundKey = Object.keys(record).find(
+      (k) => k.toLowerCase().replace(/[\s_-]+/g, "") === normField
+    );
+    if (foundKey && record[foundKey] !== undefined && record[foundKey] !== null) {
+      return String(record[foundKey]);
+    }
+    return "";
   });
   return parseSpintax(rendered);
 }

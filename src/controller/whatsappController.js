@@ -238,9 +238,40 @@ export async function sendBulkWhatsapp(recipients, messageConfig, options = {}) 
           mediaPayload.mimetype = "application/pdf";
         }
         sentInfo = await sock.sendMessage(jid, mediaPayload);
-      } else {
+      } else if (renderedText) {
         // Plain text with Spintax
         sentInfo = await sock.sendMessage(jid, { text: renderedText });
+      }
+
+      // Check if interactive Poll attachment is configured
+      const poll = messageConfig.poll;
+      if (
+        poll &&
+        poll.question &&
+        poll.question.trim() &&
+        Array.isArray(poll.options) &&
+        poll.options.length >= 2
+      ) {
+        const renderedPollName = renderWhatsappMessage(poll.question.trim(), recipient);
+        const pollValues = poll.options
+          .map((opt) => renderWhatsappMessage(String(opt || "").trim(), recipient))
+          .filter(Boolean)
+          .slice(0, 12); // WhatsApp supports up to 12 choices
+
+        if (pollValues.length >= 2) {
+          // If a text message was sent first, pause slightly for natural rhythm
+          if (sentInfo) {
+            await sleep(1000);
+          }
+          const pollInfo = await sock.sendMessage(jid, {
+            poll: {
+              name: renderedPollName,
+              values: pollValues,
+              selectableCount: Number(poll.selectableCount) || 1,
+            },
+          });
+          if (!sentInfo) sentInfo = pollInfo;
+        }
       }
 
       results.push({

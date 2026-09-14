@@ -227,8 +227,15 @@ router.post("/whatsapp/send-bulk", async (req, res) => {
     if (!settings?.accountId) {
       return res.status(400).json({ error: "Pick which connected WhatsApp account to send from." });
     }
-    if (message?.mode !== "custom_csv" && (!message?.text || !message.text.trim())) {
-      return res.status(400).json({ error: "Message text is required." });
+    const hasText = Boolean(message?.text && message.text.trim());
+    const hasPoll = Boolean(
+      message?.poll &&
+        message.poll.question?.trim() &&
+        Array.isArray(message.poll.options) &&
+        message.poll.options.length >= 2
+    );
+    if (message?.mode !== "custom_csv" && !hasText && !hasPoll) {
+      return res.status(400).json({ error: "Please provide a message text or attach a WhatsApp poll." });
     }
 
     const outcome = await sendBulkWhatsapp(recipients, message, settings);
