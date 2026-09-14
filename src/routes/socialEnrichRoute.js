@@ -30,11 +30,11 @@ router.post("/enrich/social-bulk", async (req, res) => {
       return res.status(400).json({ error: "leads (non-empty array) is required!" });
     }
 
-    // Lower cap than other bulk endpoints — this hits a search engine per
-    // lead (x2, for Facebook + Instagram), which is far more rate-limit
-    // sensitive than fetching a lead's own website.
-    if (leads.length > 100) {
-      return res.status(400).json({ error: "Max 100 leads per request." });
+    // Lower cap than other bulk endpoints — this now searches 7 social
+    // platforms per lead via DuckDuckGo, far more rate-limit sensitive than
+    // a normal website fetch. Keep batches ≤ 50 and split larger lists.
+    if (leads.length > 50) {
+      return res.status(400).json({ error: "Max 50 leads per request. Split larger lists into multiple batches." });
     }
 
     const results = await enrichSocialProfilesBulk(leads);

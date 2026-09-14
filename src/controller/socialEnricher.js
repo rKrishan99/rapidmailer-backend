@@ -3,38 +3,38 @@ import * as cheerio from "cheerio";
 
 // Social Profile & Contact Enricher
 // ----------------------------------
-// For leads that showed up on Google Maps with no website (and therefore no
-// email), most local businesses still run a Facebook Page or Instagram
-// profile for customer engagement. This module finds those pages via a
-// free, no-API-key search (DuckDuckGo's HTML endpoint, which is a plain
-// server-rendered results page — no JS, no login, no billing) and makes a
-// best-effort attempt to pull a public email/phone off the Facebook page
-// itself.
+// For leads with no website (Google Maps "No Website" exports), most local
+// businesses still run at least one social profile. This module finds those
+// profiles via DuckDuckGo's free no-JS HTML endpoint — no API key, no billing
+// — and extracts a public email/phone from any page it can read.
+//
+// Platforms searched: Facebook · Instagram · LinkedIn · Twitter/X ·
+//   YouTube · TikTok · Google Business · WhatsApp Business (extracted from
+//   page HTML rather than a separate search).
 
 const USER_AGENT =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
-/**
- * @typedef {Object} EnrichedContact
- * @property {string} businessName
- * @property {string} city
- * @property {string|null} facebookUrl
- * @property {string|null} instagramUrl
- * @property {string|null} extractedEmail
- * @property {string|null} extractedPhone
- */
+// ---------------------------------------------------------------------------
+// Junk-path filters — results that look like the right domain but are login
+// walls, help articles, advertising dashboards, etc.
+// ---------------------------------------------------------------------------
+const JUNK_PATHS = {
+  facebook: /^\/(login|sharer|help|policies|policy|plugins|tr|l\.php|groups\/[^/]+\/(permalink|posts)|watch|marketplace|events|ads|business\/help|share|dialog|media)/i,
+  instagram: /^\/(p|reel|reels|explore|accounts|stories|direct|about|legal|developer|tv)\//i,
+  linkedin: /^\/(login|signup|jobs|learning|company\/login|authwall|checkpoint|uas|comm)\//i,
+  twitter: /^\/(i\/|hashtag\/|explore|search|home|notifications|messages|settings|intent\/|share\?)/i,
+  youtube: /^\/(watch|shorts|playlist|results|feed|c\/|channel\/(?!.{3}))/i, // allow /channel/<id> if id ≥ 3 chars
+  tiktok: /^\/(login|signup|foryou|discover|upload|live|messages|tag\/|trending)/i,
+  googlebusiness: /^\/(search|maps|accounts|business\/manage|signin)/i,
+};
 
-// Paths that show up in facebook.com / instagram.com search results but are
-// never the business's own page — login walls, sharer widgets, help docs,
-// tracking pixels, etc. Anything matching these is skipped.
-const FACEBOOK_JUNK_PATH = /^\/(login|sharer|help|policies|policy|plugins|tr|l\.php|groups\/[^/]+\/(permalink|posts)|watch|marketplace|events|ads|business\/help)/i;
-const INSTAGRAM_JUNK_PATH = /^\/(p|reel|reels|explore|accounts|stories|direct|about|legal|developer)\//i;
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
-// DuckDuckGo's HTML results wrap the real target URL in a redirect link:
-// //duckduckgo.com/l/?uddg=<encoded-real-url>&rut=... — this pulls the real
-// URL back out. If a result link is already a plain URL (no redirect), it's
-// returned as-is.
-function unwrapDuckDuckGoLink(href) {
+/** DuckDuckGo wraps result URLs in a redirect. Unwrap to the real target. */
+function unwrapDDGLink(href) {
   if (!href) return null;
   try {
     const url = new URL(href, "https://duckduckgo.com");
@@ -46,36 +46,7 @@ function unwrapDuckDuckGoLink(href) {
   }
 }
 
-// Runs a DuckDuckGo HTML search and returns the raw list of result URLs, in
-// order. No API key required — this is the same endpoint DuckDuckGo serves
-// to no-JS/lite clients.
-async function searchDuckDuckGo(query) {
-  const response = await axios.get("https://html.duckduckgo.com/html/", {
-    params: { q: query },
-    timeout: 15000,
-    maxContentLength: 5 * 1024 * 1024,
-    headers: {
-      "User-Agent": USER_AGENT,
-      Accept: "text/html",
-    },
-    validateStatus: () => true,
-  });
-
-  if (typeof response.data !== "string") return [];
-
-  const $ = cheerio.load(response.data);
-  const urls = [];
-  $("a.result__a, a.result__url").each((_, el) => {
-    const href = $(el).attr("href");
-    const real = unwrapDuckDuckGoLink(href);
-    if (real) urls.push(real);
-  });
-  return urls;
-}
-
-// Strips a facebook.com/instagram.com URL down to just the profile path,
-// dropping tracking query params (?ref=..., ?fref=..., ?__tn__=...) so the
-// stored URL is clean.
+/** Strip tracking query params from a social profile URL. */
 function cleanProfileUrl(rawUrl) {
   try {
     const url = new URL(rawUrl);
@@ -88,143 +59,372 @@ function cleanProfileUrl(rawUrl) {
   }
 }
 
-async function searchFacebookPage(businessName, city) {
-  const query = `"${businessName}" "${city}" site:facebook.com`;
-  try {
-    const urls = await searchDuckDuckGo(query);
-    for (const rawUrl of urls) {
-      let parsed;
-      try {
-        parsed = new URL(rawUrl);
-      } catch {
+/** Sleep for `ms` milliseconds. */
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Run DuckDuckGo HTML search, return ordered list of result URLs.
+ * Retries up to `maxRetries` times on 429 / 503 with exponential backoff.
+ */
+async function searchDDG(query, maxRetries = 2) {
+  let delay = 1000;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await axios.get("https://html.duckduckgo.com/html/", {
+        params: { q: query },
+        timeout: 15000,
+        maxContentLength: 5 * 1024 * 1024,
+        headers: {
+          "User-Agent": USER_AGENT,
+          Accept: "text/html",
+          "Accept-Language": "en-US,en;q=0.9",
+        },
+        validateStatus: () => true,
+      });
+
+      if (response.status === 429 || response.status === 503) {
+        if (attempt < maxRetries) {
+          await sleep(delay);
+          delay *= 2;
+          continue;
+        }
+        return [];
+      }
+
+      if (typeof response.data !== "string") return [];
+
+      const $ = cheerio.load(response.data);
+      const urls = [];
+      $("a.result__a, a.result__url").each((_, el) => {
+        const real = unwrapDDGLink($(el).attr("href"));
+        if (real) urls.push(real);
+      });
+      return urls;
+    } catch (err) {
+      if (attempt < maxRetries) {
+        await sleep(delay);
+        delay *= 2;
         continue;
       }
-      if (!/(^|\.)facebook\.com$/i.test(parsed.hostname)) continue;
-      if (FACEBOOK_JUNK_PATH.test(parsed.pathname)) continue;
-      if (parsed.pathname === "/" || parsed.pathname === "") continue;
+      console.warn(`⚠️ DDG search failed (attempt ${attempt + 1}):`, err.message);
+      return [];
+    }
+  }
+  return [];
+}
+
+/**
+ * Generic platform search — queries DDG, validates each result URL against the
+ * expected hostname pattern and junk-path filter, returns the first clean match.
+ *
+ * @param {string} query           DDG query string
+ * @param {RegExp} hostnamePattern Regex that the result URL's hostname must match
+ * @param {RegExp} [junkPaths]     Regex of paths to skip (login walls, etc.)
+ * @param {number} [minPathLen=2]  Minimum characters after leading slash
+ */
+async function searchPlatform(query, hostnamePattern, junkPaths, minPathLen = 2) {
+  try {
+    const urls = await searchDDG(query);
+    for (const rawUrl of urls) {
+      let parsed;
+      try { parsed = new URL(rawUrl); } catch { continue; }
+      if (!hostnamePattern.test(parsed.hostname)) continue;
+      const path = parsed.pathname.replace(/\/+$/, "");
+      if (path.length < minPathLen) continue;
+      if (junkPaths && junkPaths.test(path)) continue;
       return cleanProfileUrl(rawUrl);
     }
     return null;
-  } catch (error) {
-    console.error(`⚠️ Facebook search failed for "${businessName}":`, error.message);
+  } catch (err) {
+    console.error(`⚠️ Platform search failed [${query.slice(0, 60)}]:`, err.message);
     return null;
   }
 }
 
-async function searchInstagramProfile(businessName, city) {
-  const query = `"${businessName}" "${city}" site:instagram.com`;
-  try {
-    const urls = await searchDuckDuckGo(query);
-    for (const rawUrl of urls) {
-      let parsed;
-      try {
-        parsed = new URL(rawUrl);
-      } catch {
-        continue;
-      }
-      if (!/(^|\.)instagram\.com$/i.test(parsed.hostname)) continue;
-      if (INSTAGRAM_JUNK_PATH.test(parsed.pathname)) continue;
-      if (parsed.pathname === "/" || parsed.pathname === "") continue;
-      return cleanProfileUrl(rawUrl);
-    }
-    return null;
-  } catch (error) {
-    console.error(`⚠️ Instagram search failed for "${businessName}":`, error.message);
-    return null;
-  }
+// ---------------------------------------------------------------------------
+// Per-platform search functions
+// ---------------------------------------------------------------------------
+
+function searchFacebook(name, loc) {
+  const q = loc
+    ? `"${name}" "${loc}" site:facebook.com`
+    : `"${name}" site:facebook.com`;
+  return searchPlatform(q, /(^|\.)facebook\.com$/i, JUNK_PATHS.facebook);
 }
 
-const EMAIL_REGEX = /[a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9._-]+/gi;
-// Loose international phone matcher: an optional +country code, then 7-14
-// more digits, allowing spaces/dashes/dots/parens as separators. Deliberately
-// permissive — this is a "does something phone-shaped exist" pass, not
-// validation.
-const PHONE_REGEX = /(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{2,4}\)[\s.-]?)?\d{2,4}[\s.-]?\d{3,4}[\s.-]?\d{3,4}/g;
+function searchInstagram(name, loc) {
+  const q = loc
+    ? `"${name}" "${loc}" site:instagram.com`
+    : `"${name}" site:instagram.com`;
+  return searchPlatform(q, /(^|\.)instagram\.com$/i, JUNK_PATHS.instagram);
+}
 
-// Best-effort only: Facebook aggressively gates logged-out/bot traffic, so
-// this will come back empty for a large share of pages — that's expected,
-// not a bug. When it works, it's a bonus; the facebookUrl itself (so a human
-// can open Messenger) is the reliable part of this feature.
-async function extractContactFromFacebookPage(facebookUrl) {
+function searchLinkedIn(name, loc) {
+  const q = loc
+    ? `"${name}" "${loc}" site:linkedin.com/company`
+    : `"${name}" site:linkedin.com/company`;
+  return searchPlatform(q, /(^|\.)linkedin\.com$/i, JUNK_PATHS.linkedin);
+}
+
+function searchTwitter(name, loc) {
+  // Search both twitter.com and x.com; DuckDuckGo indexes both.
+  const q = loc
+    ? `"${name}" "${loc}" (site:twitter.com OR site:x.com)`
+    : `"${name}" (site:twitter.com OR site:x.com)`;
+  return searchPlatform(q, /(^|\.)(?:twitter|x)\.com$/i, JUNK_PATHS.twitter);
+}
+
+function searchYouTube(name, loc) {
+  const q = loc
+    ? `"${name}" "${loc}" (site:youtube.com/channel OR site:youtube.com/@)`
+    : `"${name}" (site:youtube.com/channel OR site:youtube.com/@)`;
+  return searchPlatform(q, /(^|\.)youtube\.com$/i, JUNK_PATHS.youtube);
+}
+
+function searchTikTok(name, loc) {
+  const q = loc
+    ? `"${name}" "${loc}" site:tiktok.com/@`
+    : `"${name}" site:tiktok.com/@`;
+  return searchPlatform(q, /(^|\.)tiktok\.com$/i, JUNK_PATHS.tiktok);
+}
+
+function searchGoogleBusiness(name, loc) {
+  const q = loc
+    ? `"${name}" "${loc}" (site:g.page OR site:business.google.com)`
+    : `"${name}" (site:g.page OR site:business.google.com)`;
+  return searchPlatform(
+    q,
+    /(^|\.)(?:g\.page|business\.google\.com)$/i,
+    JUNK_PATHS.googlebusiness
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Contact & WhatsApp extraction from a discovered social page
+// ---------------------------------------------------------------------------
+
+const EMAIL_REGEX = /[a-zA-Z0-9._+-]+@[a-zA-Z0-9._-]+\.[a-zA-Z]{2,}/gi;
+const PHONE_REGEX = /(?:\+?[\d]{1,3}[\s.\-()]?)?(?:\(?\d{2,4}\)?[\s.\-]?)?\d{3,4}[\s.\-]?\d{3,4}(?:[\s.\-]?\d{2,4})?/g;
+// wa.me/+1234567890 or api.whatsapp.com/send?phone=1234567890
+const WHATSAPP_REGEX = /(?:wa\.me|api\.whatsapp\.com\/send\?phone=)[\/?+]*([\d]{7,15})/gi;
+
+/** Fetch a URL's HTML. Returns empty string on any error. */
+async function fetchHtml(url) {
   try {
-    const response = await axios.get(facebookUrl, {
+    const res = await axios.get(url, {
       timeout: 12000,
       maxContentLength: 5 * 1024 * 1024,
       headers: { "User-Agent": USER_AGENT },
       validateStatus: () => true,
     });
-
-    const html = typeof response.data === "string" ? response.data : "";
-    if (!html) return { email: null, phone: null };
-
-    const emailMatches = html.match(EMAIL_REGEX) || [];
-    const validEmail =
-      emailMatches.find(
-        (e) => !/\.(png|jpg|jpeg|gif|svg|webp|ico)$/i.test(e) && !/facebook\.com$/i.test(e)
-      ) || null;
-
-    // Only look at a text-stripped version for phone numbers — raw HTML is
-    // full of numeric noise (ids, timestamps, pixel dimensions) that would
-    // otherwise false-positive constantly.
-    const textOnly = cheerio.load(html)("body").text();
-    const phoneMatches = textOnly.match(PHONE_REGEX) || [];
-    const validPhone = phoneMatches.find((p) => p.replace(/\D/g, "").length >= 7) || null;
-
-    return {
-      email: validEmail,
-      phone: validPhone ? validPhone.trim() : null,
-    };
-  } catch (error) {
-    console.error(`⚠️ Could not read Facebook page ${facebookUrl}:`, error.message);
-    return { email: null, phone: null };
+    return typeof res.data === "string" ? res.data : "";
+  } catch {
+    return "";
   }
 }
 
 /**
- * Locate a business's social profiles and, best-effort, a public contact
- * email/phone from its Facebook page.
- * @param {{businessName: string, city: string}} input
+ * Try to extract email, phone and WhatsApp Business link from a page.
+ * Tries URLs in order until it gets at least an email or phone.
+ * @param {string[]} urlsToTry  Ordered list of page URLs to attempt
+ * @param {string[]} [skipDomains] Domains known to block scrapers (skip early)
+ */
+async function extractContactFromPages(urlsToTry, skipDomains = []) {
+  for (const url of urlsToTry) {
+    if (!url) continue;
+    try {
+      const domain = new URL(url).hostname.toLowerCase();
+      if (skipDomains.some((d) => domain.includes(d))) continue;
+    } catch {
+      continue;
+    }
+
+    const html = await fetchHtml(url);
+    if (!html) continue;
+
+    // Email — scan raw HTML (scripts/meta sometimes contain mailto: links)
+    const emailMatches = html.match(EMAIL_REGEX) || [];
+    const validEmail =
+      emailMatches.find(
+        (e) =>
+          !/\.(png|jpg|jpeg|gif|svg|webp|ico|woff|woff2|ttf|eot|css|js)$/i.test(e) &&
+          !/(?:facebook|instagram|linkedin|twitter|youtube|tiktok|sentry|google|apple|microsoft)\.com$/i.test(e) &&
+          e.length < 80
+      ) || null;
+
+    // Phone — scan text content only to avoid numeric noise in HTML attributes
+    const $ = cheerio.load(html);
+    const textOnly = $("body").text();
+    const phoneMatches = textOnly.match(PHONE_REGEX) || [];
+    const validPhone =
+      phoneMatches.find((p) => {
+        const digits = p.replace(/\D/g, "");
+        return digits.length >= 7 && digits.length <= 15;
+      }) || null;
+
+    // WhatsApp Business link — scan raw HTML for wa.me links
+    let whatsappBusinessUrl = null;
+    let waMatch;
+    WHATSAPP_REGEX.lastIndex = 0;
+    while ((waMatch = WHATSAPP_REGEX.exec(html)) !== null) {
+      const digits = waMatch[1].replace(/\D/g, "");
+      if (digits.length >= 7) {
+        whatsappBusinessUrl = `https://wa.me/${digits}`;
+        break;
+      }
+    }
+
+    if (validEmail || validPhone || whatsappBusinessUrl) {
+      return {
+        email: validEmail,
+        phone: validPhone ? validPhone.trim() : null,
+        whatsappBusinessUrl,
+      };
+    }
+  }
+
+  return { email: null, phone: null, whatsappBusinessUrl: null };
+}
+
+// ---------------------------------------------------------------------------
+// Sanity guard — skip hopeless queries
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns false if the business name is too generic to search reliably.
+ * E.g. empty, less than 3 chars, or pure numbers.
+ */
+function isNameSearchable(name) {
+  if (!name || name.trim().length < 3) return false;
+  const letters = (name.match(/[a-zA-Z\u00C0-\u024F]/g) || []).length;
+  return letters >= 2;
+}
+
+// ---------------------------------------------------------------------------
+// Per-lead 30-second hard timeout guard
+// ---------------------------------------------------------------------------
+function withTimeout(promise, ms, fallback) {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {Object} EnrichedContact
+ * @property {string}      businessName
+ * @property {string}      city
+ * @property {string|null} facebookUrl
+ * @property {string|null} instagramUrl
+ * @property {string|null} linkedinUrl
+ * @property {string|null} twitterUrl
+ * @property {string|null} youtubeUrl
+ * @property {string|null} tiktokUrl
+ * @property {string|null} googleBusinessUrl
+ * @property {string|null} whatsappBusinessUrl
+ * @property {string|null} extractedEmail
+ * @property {string|null} extractedPhone
+ */
+
+/**
+ * Locate a business's social profiles across 8 platforms and extract a public
+ * email/phone where possible. Hard-capped at 30 s per lead.
+ *
+ * @param {{ businessName: string, city?: string, website?: string }} input
  * @returns {Promise<EnrichedContact>}
  */
-export async function enrichSocialProfile({ businessName, city }) {
+export async function enrichSocialProfile({ businessName, city, website } = {}) {
   const name = (businessName || "").trim();
   const location = (city || "").trim();
 
+  /** @type {EnrichedContact} */
   const base = {
     businessName: name,
     city: location,
     facebookUrl: null,
     instagramUrl: null,
+    linkedinUrl: null,
+    twitterUrl: null,
+    youtubeUrl: null,
+    tiktokUrl: null,
+    googleBusinessUrl: null,
+    whatsappBusinessUrl: null,
     extractedEmail: null,
     extractedPhone: null,
   };
 
-  if (!name) return base;
+  if (!isNameSearchable(name)) return base;
 
-  const [facebookUrl, instagramUrl] = await Promise.all([
-    searchFacebookPage(name, location),
-    searchInstagramProfile(name, location),
-  ]);
+  const enrichTask = async () => {
+    // Run all 7 social platform searches concurrently (one DDG request each).
+    const [
+      facebookUrl,
+      instagramUrl,
+      linkedinUrl,
+      twitterUrl,
+      youtubeUrl,
+      tiktokUrl,
+      googleBusinessUrl,
+    ] = await Promise.all([
+      searchFacebook(name, location),
+      searchInstagram(name, location),
+      searchLinkedIn(name, location),
+      searchTwitter(name, location),
+      searchYouTube(name, location),
+      searchTikTok(name, location),
+      searchGoogleBusiness(name, location),
+    ]);
 
-  base.facebookUrl = facebookUrl;
-  base.instagramUrl = instagramUrl;
+    base.facebookUrl = facebookUrl;
+    base.instagramUrl = instagramUrl;
+    base.linkedinUrl = linkedinUrl;
+    base.twitterUrl = twitterUrl;
+    base.youtubeUrl = youtubeUrl;
+    base.tiktokUrl = tiktokUrl;
+    base.googleBusinessUrl = googleBusinessUrl;
 
-  if (facebookUrl) {
-    const { email, phone } = await extractContactFromFacebookPage(facebookUrl);
+    // Contact extraction: try discovered pages in order of likelihood of
+    // having public contact info. Facebook blocks scrapers most aggressively
+    // so it goes last; Google Business and website go first.
+    // WhatsApp Business link may also be found embedded in any page.
+    const pagesToScan = [
+      googleBusinessUrl,
+      website || null,   // if the lead row has a website despite being "no website" (edge case)
+      facebookUrl,
+      instagramUrl,
+    ].filter(Boolean);
+
+    // Domains that reliably block scraping and should be skipped early
+    const alwaysBlockedDomains = ["facebook.com", "instagram.com", "linkedin.com", "tiktok.com", "twitter.com", "x.com", "youtube.com"];
+
+    // Only skip known blocked domains for email/phone; WhatsApp links can
+    // appear on any page including blocked ones — we still try to scrape
+    // them for wa.me URLs since that's in the public HTML source.
+    const { email, phone, whatsappBusinessUrl } = await extractContactFromPages(
+      pagesToScan,
+      [] // don't skip any domain — let the fetch timeout handle it
+    );
+
     base.extractedEmail = email;
     base.extractedPhone = phone;
-  }
+    if (whatsappBusinessUrl) base.whatsappBusinessUrl = whatsappBusinessUrl;
 
-  return base;
+    return base;
+  };
+
+  return withTimeout(enrichTask(), 30_000, base);
 }
 
 /**
- * Bulk version for a filtered leads list from the Google Maps table. Search
- * engines are far more sensitive to bursty traffic than a normal website
- * fetch, so this uses a smaller concurrency than the other bulk tools in
- * this app.
- * @param {Array<{businessName?: string, name?: string, city?: string, address?: string}>} leads
- * @param {number} concurrency
+ * Bulk enrichment for a list of leads. Concurrency-capped (default 3) and
+ * staggered with a short delay between items to stay polite to DDG.
+ *
+ * @param {Array<{businessName?: string, name?: string, city?: string, address?: string, website?: string}>} leads
+ * @param {number} [concurrency=3]
  * @returns {Promise<EnrichedContact[]>}
  */
 export async function enrichSocialProfilesBulk(leads, concurrency = 3) {
@@ -237,18 +437,20 @@ export async function enrichSocialProfilesBulk(leads, concurrency = 3) {
       if (!item) continue;
       const { lead, index } = item;
 
-      const businessName = lead.businessName || lead.name || "";
-      // Google Maps leads carry a full `address`, not a clean `city` field —
-      // fall back to the address string itself as the search's location
-      // term when no explicit city is given. Good enough for a search query.
-      const city = lead.city || lead.address || "";
+      const businessName = (lead.businessName || lead.name || "").trim();
+      const city = (lead.city || lead.address || "").trim();
+      const website = lead.website || lead.url || "";
 
-      const enriched = await enrichSocialProfile({ businessName, city });
-      results[index] = { ...lead, ...enriched };
+      try {
+        const enriched = await enrichSocialProfile({ businessName, city, website });
+        results[index] = { ...lead, ...enriched };
+      } catch (err) {
+        console.error(`⚠️ Enrichment failed for "${businessName}":`, err.message);
+        results[index] = { ...lead };
+      }
 
-      // Small stagger between requests on top of the worker concurrency cap,
-      // to stay polite to the search endpoint.
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      // Stagger requests to stay polite to the search endpoint.
+      await sleep(400);
     }
   }
 
