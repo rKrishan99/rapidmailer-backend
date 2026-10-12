@@ -19,6 +19,7 @@ import emailAccountsRoute from './src/routes/emailAccountsRoute.js';
 import socialEnrichRoute from './src/routes/socialEnrichRoute.js';
 import whatsappRoute from './src/routes/whatsappRoute.js';
 import diagnosticsRoute from './src/routes/diagnosticsRoute.js';
+import ominiRoute from './src/routes/ominiRoute.js';
 import { isEmailConfigured } from './src/config/settingsStore.js';
 import { closeAllTrackedBrowsers } from './src/utils/browserRegistry.js';
 import { autoRestoreSessions } from './src/controller/whatsappSessionManager.js';
@@ -116,6 +117,7 @@ app.use('/api', emailAccountsRoute);
 app.use('/api', socialEnrichRoute);
 app.use('/api', whatsappRoute);
 app.use('/api', diagnosticsRoute);
+app.use('/api', ominiRoute);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });

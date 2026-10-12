@@ -30,7 +30,6 @@ export function getMachineHWID() {
     ].join("|");
 
     const hash = crypto.createHash("sha256").update(rawId).digest("hex").toUpperCase();
-    // Format into clean standard hardware identifier e.g. HWID-XXXX-XXXX-XXXX-XXXX
     return `HWID-${hash.slice(0, 4)}-${hash.slice(4, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}`;
   } catch (err) {
     return "HWID-COMMERCIAL-RAPID-001";
@@ -46,7 +45,14 @@ function defaultLicense() {
     licenseKey: "OMNI-PRO-9842-8712-4410",
     tier: "Omni All-in-One Suite", // 'Lead Miner' | 'Outreach Pro' | 'Omni All-in-One Suite'
     status: "active",
-    features: ["scraping", "whatsapp", "email", "unlimited_matrix", "bulk_verification"],
+    features: [
+      "scraping",
+      "whatsapp",
+      "email",
+      "unlimited_matrix",
+      "bulk_verification",
+      "omini_copilot"
+    ],
     activatedAt: new Date().toISOString(),
     expiresAt: null, // Lifetime / Annual
     boundHwid: getMachineHWID(),
@@ -61,8 +67,16 @@ export function getLicenseInfo() {
   try {
     if (fs.existsSync(LICENSE_FILE)) {
       const raw = JSON.parse(fs.readFileSync(LICENSE_FILE, "utf8"));
+      // Ensure omini_copilot is included for active Pro/Suite licenses
+      const tier = raw.tier || "";
+      const isProOrSuite = tier.includes("Suite") || tier.includes("Pro") || tier.includes("All-in-One");
+      let features = Array.isArray(raw.features) ? [...raw.features] : [];
+      if (isProOrSuite && !features.includes("omini_copilot")) {
+        features.push("omini_copilot");
+      }
       return {
         ...raw,
+        features,
         hwid,
         isBound: !raw.boundHwid || raw.boundHwid === hwid,
       };
@@ -82,6 +96,16 @@ export function getLicenseInfo() {
 }
 
 /**
+ * Check if a specific feature entitlement is active
+ */
+export function isFeatureAllowed(featureName) {
+  const license = getLicenseInfo();
+  if (license.status !== "active") return false;
+  if (!license.features || !Array.isArray(license.features)) return false;
+  return license.features.includes(featureName);
+}
+
+/**
  * Activate or update license key
  */
 export function activateLicense({ email, licenseKey }) {
@@ -94,11 +118,11 @@ export function activateLicense({ email, licenseKey }) {
 
   // Tier detection based on key format / prefix
   let tier = "Outreach Pro";
-  let features = ["scraping", "whatsapp", "email"];
+  let features = ["scraping", "whatsapp", "email", "omini_copilot"];
 
   if (cleanKey.includes("SUITE") || cleanKey.includes("ALL") || cleanKey.includes("PRO")) {
     tier = "Omni All-in-One Suite";
-    features = ["scraping", "whatsapp", "email", "unlimited_matrix", "bulk_verification"];
+    features = ["scraping", "whatsapp", "email", "unlimited_matrix", "bulk_verification", "omini_copilot"];
   } else if (cleanKey.includes("LEAD") || cleanKey.includes("SCRAP")) {
     tier = "Lead Miner";
     features = ["scraping"];
