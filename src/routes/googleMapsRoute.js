@@ -1,6 +1,6 @@
 import express from "express";
 import { scrapeGoogleMaps } from "../scrapers/googleMapScraper.js";
-import { scrapeGrid } from "../controller/googleMapsGridController.js";
+import { scrapeGrid, readLastGridRun } from "../controller/googleMapsGridController.js";
 
 const router = express.Router();
 
@@ -66,6 +66,14 @@ router.post("/google-maps", async (req, res) => {
 //   results     — the full merged results array (final event)
 //   fatal       — unrecoverable error (Chromium missing, etc.)
 // ---------------------------------------------------------------------------
+// GET /api/google-maps-grid/last — the last grid run saved on disk (updated
+// after every slot), so results survive a page refresh or a dropped stream.
+router.get("/google-maps-grid/last", (req, res) => {
+  const run = readLastGridRun();
+  if (!run) return res.status(404).json({ error: "No saved grid run" });
+  res.json(run);
+});
+
 router.post("/google-maps-grid", async (req, res) => {
   const { query, subLocations, maxPerSlot } = req.body || {};
 
@@ -110,6 +118,18 @@ router.post("/google-maps-grid", async (req, res) => {
     }
   };
 
+  // Heartbeat: a slot can take many minutes without emitting anything, and an
+  // idle stream is what proxies/OS layers tend to cut. SSE comment lines
+  // (starting with ":") are ignored by the client parser.
+  const heartbeat = setInterval(() => {
+    try {
+      res.write(": keep-alive\n\n");
+      if (typeof res.flush === "function") res.flush();
+    } catch (_) {
+      // client gone
+    }
+  }, 15000);
+
   try {
     const { results, stats } = await scrapeGrid({
       query: query.trim(),
@@ -129,6 +149,7 @@ router.post("/google-maps-grid", async (req, res) => {
         : err.message || "Unexpected scraping error",
     });
   } finally {
+    clearInterval(heartbeat);
     res.end();
   }
 });

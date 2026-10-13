@@ -9,8 +9,40 @@
 // Progress is streamed to the caller via a `progressCallback` so the HTTP
 // layer can forward it as Server-Sent Events (SSE) for real-time UI updates.
 
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { scrapeGoogleMaps } from "../scrapers/googleMapScraper.js";
 import { isMissingBrowserError } from "../utils/browserRegistry.js";
+
+// ---------------------------------------------------------------------------
+// Crash/refresh safety: the last grid run is saved to disk after every slot,
+// so a dropped stream or a page reload never loses the leads already found.
+// Stored under <backend>/data/ (ignored by nodemon, so writing it never
+// restarts the server).
+// ---------------------------------------------------------------------------
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const RUN_FILE = path.join(__dirname, "..", "..", "data", "last_grid_run.json");
+
+function saveSnapshot(snapshot) {
+  try {
+    fs.mkdirSync(path.dirname(RUN_FILE), { recursive: true });
+    const tmp = `${RUN_FILE}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(snapshot));
+    fs.renameSync(tmp, RUN_FILE); // atomic swap: never leaves a half-written file
+  } catch (err) {
+    console.error("Could not save grid run snapshot:", err.message);
+  }
+}
+
+/** Returns the last saved grid run, or null if none / unreadable. */
+export function readLastGridRun() {
+  try {
+    return JSON.parse(fs.readFileSync(RUN_FILE, "utf8"));
+  } catch (_) {
+    return null;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Deduplication
@@ -151,6 +183,17 @@ export async function scrapeGrid({
       error: slotError,
     });
 
+    // Save progress to disk after EVERY slot (see note at top of file).
+    saveSnapshot({
+      status: "running",
+      query,
+      subLocations: slots,
+      slotsDone: i + 1,
+      savedAt: new Date().toISOString(),
+      results: Array.from(seen.values()),
+      stats: null,
+    });
+
     emit({
       event: slotError ? "error" : "slot_done",
       slotIndex: i,
@@ -181,6 +224,16 @@ export async function scrapeGrid({
     slotsWithErrors: slotStats.filter((s) => s.error).length,
     slotBreakdown: slotStats,
   };
+
+  saveSnapshot({
+    status: "complete",
+    query,
+    subLocations: slots,
+    slotsDone: slots.length,
+    savedAt: new Date().toISOString(),
+    results,
+    stats,
+  });
 
   emit({
     event: "complete",
