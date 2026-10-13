@@ -96,13 +96,28 @@ export async function scrapeGoogleMaps(query, location, maxResults = 100) {
                 const name = result.querySelector('.qBF1Pd.fontBodyMedium .fontHeadlineSmall')?.textContent.trim() ||
                              result.querySelector('.fontHeadlineSmall')?.textContent.trim() || 'No Name';
                 const address = Array.from(result.querySelectorAll('.W4Efsd span'))
-                    .find(el => el.textContent.includes('·'))?.nextSibling?.textContent.trim() || 'No Address';
-                const rating = result.querySelector('.QBUL8c .MW4etd')?.textContent.trim() || 'No Rating';
-                const category = result.querySelector('.W4Efsd span')?.textContent.trim() || 'No Category';
+                    .find(el => el.textContent.includes('·'))?.nextSibling?.textContent.replace(/^[\s·⋅]+/, '').trim() || 'No Address';
+                // Rating + review count live in an aria-label like "4.7 stars 193 Reviews".
+                const ratingLabel = result.querySelector('span[role="img"][aria-label]')?.getAttribute('aria-label') || '';
+                const ratingMatch = ratingLabel.match(/([0-5](?:\.\d)?)\s*stars?\s*([\d,]+)?/i);
+                const rating = ratingMatch?.[1] || result.querySelector('.MW4etd')?.textContent.trim() || 'No Rating';
+                const reviews = ratingMatch?.[2] || '';
+                // Category = first text span in the info rows that isn't the rating,
+                // an address fragment, or an open/closed status.
+                const category = Array.from(result.querySelectorAll('.W4Efsd span'))
+                    .map(el => el.textContent.trim())
+                    .find(t => t && !/^[0-5](\.\d)?\s*\(/.test(t) && !/^\(?[\d,]+\)?$/.test(t)
+                        && !/^[·⋅]$/.test(t) && !/^(open|closed|opens|closes)/i.test(t)
+                        && !/\d/.test(t)) || 'No Category';
+                const cardPhone = result.querySelector('.UsdlK')?.textContent.trim() || '';
                 const status = Array.from(result.querySelectorAll('.W4Efsd span'))
                     .find(el => el.textContent.includes('Open'))?.textContent.trim() || 'No Status';
+                // The result card in the left list shows a "Website" button when
+                // Google has a site for the business. Capture it now as a second
+                // source that doesn't depend on the detail panel loading.
+                const cardWebsite = result.querySelector('a[data-value="Website"]')?.href || '';
 
-                businesses.push({ name, address, rating, category, status });
+                businesses.push({ name, address, rating, reviews, category, status, cardWebsite, cardPhone });
             });
             return businesses;
         });
@@ -119,40 +134,144 @@ export async function scrapeGoogleMaps(query, location, maxResults = 100) {
                 continue;
             }
 
-            // Click on the result using its aria-label
-            const resultSelector = `.Nv2PK > a[aria-label="${result.name}"]`;
-            try {
-                await page.waitForSelector(resultSelector, { timeout: 30000 });
-                await page.click(resultSelector);
-            } catch (error) {
-                console.error(`Failed to click result "${result.name}":`, error.message);
-                continue; // Skip this result
-            }
+            let panelReady = false;
+            let clickFailed = false;
+            // Two attempts: the panel occasionally fails to open on the first click.
+            for (let attempt = 0; attempt < 2 && !panelReady; attempt++) {
+                clickFailed = false;
+                // Click the result by its position in the list (aria-label selectors
+                // break on names containing quotes and on duplicate names).
+                try {
+                    // Real (puppeteer) mouse click, like the original code used —
+                    // an in-page element.click() doesn't always open the panel.
+                    const cards = await page.$$('.Nv2PK');
+                    const card = cards[index];
+                    const link = card && ((await card.$('a.hfpxzc')) || (await card.$('a')));
+                    if (!link) throw new Error('result link not found');
+                    await link.evaluate((el) => el.scrollIntoView({ block: 'center' }));
+                    await link.click();
+                } catch (error) {
+                    console.error(`Failed to click result "${result.name}":`, error.message);
+                    clickFailed = true;
+                }
 
-            // Wait for the right panel to load
-            try {
-                await page.waitForSelector('.RcCsl', { timeout: 30000 });
-            } catch (error) {
-                console.error("Right panel failed to load:", error.message);
-                continue; // Skip this result
+                if (clickFailed) continue;
+
+                // Wait until the detail panel is actually showing THIS business.
+                // Previously we only waited for '.RcCsl', which can still be on the
+                // page from the previous result, so details could be read too early
+                // (stale or empty) and websites came back as "No Website".
+                try {
+                    await page.waitForFunction(
+                        (expected) => {
+                            const norm = (t) => String(t || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+                            const want = norm(expected);
+                            const candidates = [
+                                document.querySelector('h1.DUwDvf')?.textContent,
+                                ...Array.from(document.querySelectorAll('div[role="main"][aria-label]'))
+                                    .map((el) => el.getAttribute('aria-label')),
+                            ];
+                            return candidates.some((c) => {
+                                const got = norm(c);
+                                return !!got && !!want && (got === want || got.includes(want) || want.includes(got));
+                            });
+                        },
+                        { timeout: 15000 },
+                        result.name
+                    );
+                    panelReady = true;
+                    // give the lazily-rendered action rows (website/phone) a moment
+                    await page.waitForSelector(
+                        'a[data-item-id="authority"], button[data-item-id^="phone:tel:"], button[data-item-id="address"]',
+                        { timeout: 4000 }
+                    ).catch(() => {});
+                } catch (error) {
+                    console.error(`Detail panel did not load for "${result.name}":`, error.message);
+                }
+
+            }
+            if (clickFailed) {
+                // Couldn't open this result at all: we don't know its website status.
+                extractedData[index] = { ...extractedData[index], website: 'Unknown', hasWebsite: null, websiteType: 'unknown' };
+                continue;
             }
 
             // Extract detailed information
-            const detailedInfo = await page.evaluate(() => {
-                const name = document.querySelector('h1.DUwDvf.lfPIob')?.textContent.trim() || 'No Name';
+            const detailedInfo = panelReady ? await page.evaluate(() => {
+                const name = document.querySelector('h1.DUwDvf.lfPIob')?.textContent.trim()
+                    || document.querySelector('h1.DUwDvf')?.textContent.trim()
+                    || document.querySelector('div[role="main"][aria-label]')?.getAttribute('aria-label') || 'No Name';
                 const rating = document.querySelector('.F7nice span[aria-hidden="true"]')?.textContent.trim() || 'No Rating';
                 const reviews = document.querySelector('.F7nice span[aria-label^="Rated"]')?.textContent.trim() || 'No Reviews';
                 const category = document.querySelector('button.DkEaL')?.textContent.trim() || 'No Category';
-                const website = Array.from(document.querySelectorAll('div.Io6YTe.fontBodyMedium.kR99db.fdkmkc'))
-                    .find(el => el.textContent.includes('.'))?.textContent.trim() || 'No Website';
-                const phone = Array.from(document.querySelectorAll('div.Io6YTe.fontBodyMedium.kR99db.fdkmkc'))
-                    .find(el => el.textContent.startsWith('+'))?.textContent.trim() || 'No Phone';
 
-                return { name, rating, reviews, category, website, phone };
-            });
+                // Stable selectors: Google's data-item-id attributes survive the
+                // obfuscated class-name changes that broke the old selector.
+                const siteEl = document.querySelector('a[data-item-id="authority"]');
+                const websiteHref = siteEl?.href || '';
+
+                const phoneEl = document.querySelector('button[data-item-id^="phone:tel:"]');
+                const phone = phoneEl
+                    ? (phoneEl.getAttribute('data-item-id').replace('phone:tel:', '')
+                        || phoneEl.getAttribute('aria-label')?.replace(/^Phone:\s*/i, '').trim() || '')
+                    : '';
+
+                const addrEl = document.querySelector('button[data-item-id="address"]');
+                const fullAddress = addrEl?.getAttribute('aria-label')?.replace(/^Address:\s*/i, '').trim() || '';
+
+                return { name, rating, reviews, category, websiteHref, phone, fullAddress, panelLoaded: true };
+            }) : { panelLoaded: false };
+
+            // Decide the website verdict in one place.
+            const SOCIAL_HOSTS = ['facebook.com', 'fb.com', 'fb.me', 'instagram.com', 'linktr.ee', 'tiktok.com',
+                'twitter.com', 'x.com', 'youtube.com', 'yelp.com', 'business.site', 'wixsite.com', 'sites.google.com'];
+            const isSocialOnly = (u) => {
+                try {
+                    const host = new URL(u).hostname.replace(/^www\./, '').toLowerCase();
+                    return SOCIAL_HOSTS.some((h) => host === h || host.endsWith('.' + h));
+                } catch (_) { return false; }
+            };
+            // Google wraps outbound links as https://www.google.com/url?q=<real url>&...
+            // Unwrap them and drop tracking params so we store the clean site.
+            const cleanUrl = (u) => {
+                try {
+                    let url = new URL(u);
+                    if (/(^|\.)google\.[a-z.]+$/i.test(url.hostname) && url.pathname === '/url') {
+                        const q = url.searchParams.get('q') || url.searchParams.get('url');
+                        if (!q) return '';
+                        url = new URL(q);
+                    }
+                    ['utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term', 'fbclid', 'gclid']
+                        .forEach((k) => url.searchParams.delete(k));
+                    return url.toString();
+                } catch (_) { return ''; }
+            };
+            const rawSite = cleanUrl((detailedInfo.websiteHref || result.cardWebsite || '').trim());
+            let website, hasWebsite, websiteType;
+            if (rawSite) {
+                website = rawSite;
+                if (isSocialOnly(rawSite)) { website = 'No Website'; detailedInfo.socialUrl = rawSite; hasWebsite = false; websiteType = 'social-only'; }
+                else { hasWebsite = true; websiteType = 'own-site'; }
+            } else if (detailedInfo.panelLoaded) {
+                website = 'No Website'; hasWebsite = false; websiteType = 'none';
+            } else {
+                // Panel never loaded and the list card had no site: we do NOT
+                // know. Don't claim "No Website" — flag it for a re-check.
+                website = 'Unknown'; hasWebsite = null; websiteType = 'unknown';
+            }
+            delete detailedInfo.websiteHref;
+            delete detailedInfo.panelLoaded;
+            detailedInfo.website = website;
+            detailedInfo.hasWebsite = hasWebsite;
+            detailedInfo.websiteType = websiteType;
+            if (!detailedInfo.phone && result.cardPhone) detailedInfo.phone = result.cardPhone;
+            if (!detailedInfo.phone) delete detailedInfo.phone;
+            if (!detailedInfo.fullAddress) delete detailedInfo.fullAddress;
 
             // Add detailed info to the result
             extractedData[index] = { ...extractedData[index], ...detailedInfo };
+            delete extractedData[index].cardWebsite;
+            delete extractedData[index].cardPhone;
 
             // Close the right panel to prepare for the next result
             await page.keyboard.press('Escape');
